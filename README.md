@@ -8,7 +8,7 @@
 
 **Teach your agent the decisions, not just the code — and make it prove the result with tests.**
 
-[![CI](https://img.shields.io/github/actions/workflow/status/trangrena/backend-production-kit/ci.yml?branch=main&style=flat-square&label=CI)](https://github.com/trangrena/backend-production-kit/actions/workflows/ci.yml)
+[![CI](https://img.shields.io/github/actions/workflow/status/tuancuongpham/backend-production-kit/ci.yml?branch=main&style=flat-square&label=CI)](https://github.com/tuancuongpham/backend-production-kit/actions/workflows/ci.yml)
 [![Skills](https://img.shields.io/badge/skills-11-2f81f7?style=flat-square)](#the-skills)
 [![Verification tests](https://img.shields.io/badge/tests-108%20passing-2ea043?style=flat-square)](#verification)
 [![Node 24](https://img.shields.io/badge/node-%E2%89%A524-339933?style=flat-square&logo=node.js&logoColor=white)](#verification)
@@ -40,7 +40,7 @@ cp -r skills/* ~/.claude/skills/
 Or install the kit as a plugin from an interactive `claude` terminal:
 
 ```text
-/plugin marketplace add trangrena/backend-production-kit
+/plugin marketplace add tuancuongpham/backend-production-kit
 /plugin install backend-production-kit@backend-production-kit
 ```
 

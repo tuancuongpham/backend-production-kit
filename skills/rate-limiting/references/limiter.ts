@@ -74,6 +74,12 @@ class LocalBuckets {
 }
 
 export function createRateLimiter(o: LimiterOptions) {
+  // A bucket that never refills makes the script divide by zero and PEXPIRE "inf": every Redis call
+  // errors (allowed ones too) and the limiter silently runs in its failure mode. Refuse it up front.
+  if (!(o.capacity > 0) || !Number.isFinite(o.capacity)) throw new Error('rate limiter: capacity must be a positive number');
+  if (!(o.refillPerSec > 0) || !Number.isFinite(o.refillPerSec)) {
+    throw new Error('rate limiter: refillPerSec must be a positive number (for a fixed quota, use a tiny rate and a long-lived key)');
+  }
   const timeoutMs = o.timeoutMs ?? 50;
   const threshold = o.breakerThreshold ?? 5;
   const cooldown = o.breakerCooldownMs ?? 5000;

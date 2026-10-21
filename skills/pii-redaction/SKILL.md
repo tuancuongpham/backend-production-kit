@@ -49,5 +49,6 @@ ADR: placeholder style and HMAC key handling, which sinks are covered, prompt-st
 - Redacting only `message` and forgetting `err.stack`, which often embeds the input.
 - Patterns without boundaries. `\d{12}` eats trace ids and timestamps, and then people turn redaction off.
 - **Unbounded quantifiers.** Logs carry attacker-controlled text. `[A-Za-z0-9._%+-]+@…` scans to the end of the string from every position, so one 50 KB log line without `@` took ~1.9 s to redact: a logging-path denial of service. Bound every quantifier (`{1,64}`, as RFC limits allow), add a cheap `hint` pre-check per detector, and truncate strings above `maxStringLength` (16 KiB by default) before scanning. After the fix the same line takes 0.2 ms, and structured records redact 71% faster (`bench/run.ts`).
+- Merging the detectors into one big regex "for speed". It produced identical output on every fixture but ran 1.3–3.3× slower than per-detector regexes with hints, because the hints skip most detectors on most lines. Dropping the hints is 1.8–4.7× slower ([performance](../../docs/performance.md)).
 - Logging `req.body` "temporarily".
 - Treating redaction as encryption. It is lossy on purpose; keep raw data in the database under access control, not in logs.

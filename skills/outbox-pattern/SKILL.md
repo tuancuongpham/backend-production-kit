@@ -28,6 +28,8 @@ This is also how to keep slow AI work off the request path. The request writes `
 1. Migration: [references/outbox.sql](references/outbox.sql), which creates `outbox`, `processed_messages`, and an optional NOTIFY trigger.
 2. Producer: call `enqueue(tx, …)` from [references/outbox.ts](references/outbox.ts) with the **business transaction's client**. Put `traceparent` and the tenant id in `headers`, and add a schema version to the payload.
 3. Relay: run `createRelay({ pool, publish }).relayOnce()` in a loop (on NOTIFY, plus every 1–5 s as fallback). It takes `pg_try_advisory_xact_lock`, so only one relay instance is active, which is what keeps ordering. It stops at the first failed publish so later messages don't overtake.
+   - `publishTimeoutMs` (default 10 s) fails a publish that never settles. Without it, one hung broker call keeps the relay's transaction and lock open forever: every instance skips, and the outbox stops with no error anywhere.
+   - Published messages are marked with one `UPDATE … WHERE id = ANY($1)` per batch, not one per message. That gives 8× the relay throughput at batch 100 (26,600 vs 3,200 messages/s against an instant broker) with the same crash behaviour, because the marks only become durable at `COMMIT` either way. With a real broker, publish latency dominates: use its async or batched publish API before raising `batchSize`.
 4. Consumers: wrap every handler in `consumeOnce(pool, 'consumer-name', msg.id, tx => …)`. A consumer whose side effects are outside this DB (email, HTTP) passes `msg.id` as the downstream idempotency key instead.
 5. Metrics: export outbox lag (`now() - min(created_at) WHERE published_at IS NULL`), publish failures, duplicate rate at consumers. Alert on lag.
 
@@ -40,6 +42,7 @@ This is also how to keep slow AI work off the request path. The request writes `
 - Publish succeeds but the relay "crashes" before marking → the broker receives a duplicate → the consumer reports `applied`, then `duplicate`, and the side effect happens once.
 - Consumer throws → the dedup mark rolls back → a retry applies.
 - Two relays at once → one backs off, nothing is published twice.
+- A publish that never returns → `relayOnce` gives up after `publishTimeoutMs`, records the error on that message, and releases the lock, so the next run can proceed ([latent-bugs-round2.test.ts](../../verify/tests/latent-bugs-round2.test.ts)).
 
 In a staging environment, also kill the relay process mid-batch (`kill -9`) and confirm the lag recovers with no gaps at the consumer.
 
@@ -51,3 +54,4 @@ ADR: why outbox over event sourcing or dual writes, broker choice, ordering scop
 - Several relays with `SKIP LOCKED` and no leader: throughput goes up, ordering is gone.
 - Consumers that "check then act" without a unique constraint, so races double-apply.
 - Publishing inside the business transaction ("just to be safe"): it holds locks during network I/O, and a publish followed by a rollback produces ghost events.
+- Awaiting the broker with no timeout inside the relay's transaction: a single hung connection silently stops all event delivery.

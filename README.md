@@ -64,8 +64,35 @@ found in it (several are classic production incidents), now fixed and guarded by
 | Rate limiter local fallback under key churn | the **busiest client gets a fresh bucket** during an outage | true LRU eviction |
 | `SET LOCAL hnsw.iterative_scan` on pgvector 0.5–0.7 | **intermittent aborted transactions** on reused connections | only set where supported |
 | Webhook worker processing one event at a time | 200 events with 5 ms handlers: **3.2 s** backlog | **0.45 s** with bounded concurrency (7×) |
+| Semantic cache: HNSW index with a tenant filter | a tenant's own cached answer **missed for popular questions** (found 4 of 20), each miss a paid model call | exact search within the tenant: 20 of 20, 0.45 ms |
+| Webhook claim under a backlog | every claim sorted the whole backlog: **56 ms per claim with 200,000 events due**, slowest when it most needs speed | 0.6 ms at any backlog size |
+| Outbox relay meets a hung broker call | **all event delivery stops silently**, the relay lock held forever | publish timeout; the next run carries on |
+| Oversized upload | the client sees a **connection reset instead of 413** and retries the whole upload | 413 delivered; under 8 MB of a 32 MB upload read |
+| SSE feed with a stalled browser tab | **unbounded memory**: 40 MB buffered for one client in the test | client dropped after 1,000 events, reconnects with replay |
+| Rate limiter with `refillPerSec: 0` | every check errors and the limiter **silently runs in its failure mode** | rejected at startup |
+| A 240 KB RAG prompt in a trace | oversized spans get dropped: **the biggest requests become untraceable** | bounded at 32 KiB per attribute |
+| Postgres ends a connection mid-transaction (failover, `idle_in_transaction_session_timeout`) | **the whole Node process crashes**, with every in-flight request | only that request fails; tested in every skill that holds a connection |
 
-Benchmarks: `node bench/run.ts` ([before/after numbers](docs/performance.md)).
+## Faster, and measured against the alternatives
+
+For each hot path, the realistic alternatives were benchmarked side by side on real Postgres and Redis, and the
+reference code ships the winner ([every table, plan and trade-off](docs/performance.md)):
+
+| Hot path | Compared | Shipped | Measured gain |
+|---|---|---|---|
+| Sending embeddings to Postgres | text (17 or 9 digits) vs binary | binary `vectorParam` | ~3× faster lookups and inserts, 5× fewer bytes |
+| Storing vectors for exact search | out of line (default) vs in the row vs `halfvec` | in the row (`STORAGE MAIN`) | 2–3× faster, identical results |
+| Semantic cache lookup | HNSW + filter vs HNSW iterative scan vs exact per tenant | exact; ANN opt-in for big tenants | the only option both correct and fastest for typical tenants |
+| Webhook worker | one loop with parallel lanes vs independent loops | `run({ loops })` | 1.8× faster when some handlers are slow |
+| Outbox relay | one `UPDATE` per message vs per batch | per batch | 8× throughput |
+| LLM budget reservation | two statements vs one upsert | upsert | 20% lower latency, 37% more throughput |
+| Claiming an idempotency key | check-then-insert vs insert-and-wait vs try-lock + 409 | try-lock + 409 | 20 duplicates: handler runs once, not 20; 0.13 s of pooled connections held, not 4 s |
+| Tenant transaction (RLS) | 4 round trips vs 3 | 3 | 19% faster per request; RLS itself costs ~0 |
+| Rate limiter client | ioredis defaults vs auto-pipelining | defaults (kept) | auto-pipelining was 11% slower |
+| PII redaction | hints vs no hints vs one combined regex | hints (kept) | 1.3–4.7× faster than the alternatives |
+
+Benchmarks: `npm run bench:docker -- bench/compare/<name>.ts` and `node bench/run.ts`. Next skills under
+consideration: [roadmap](docs/roadmap.md).
 
 ## Quick start
 
@@ -101,6 +128,7 @@ on its own.
 | [`multitenant-postgres`](skills/multitenant-postgres/SKILL.md) | keep customers' data apart in one Postgres, including RAG / vector search |
 | [`webhook-ingestion`](skills/webhook-ingestion/SKILL.md) | receive payment or SaaS webhooks (Stripe, VNPay, MoMo, GitHub…) |
 | [`outbox-pattern`](skills/outbox-pattern/SKILL.md) | publish events or start async (AI) work after a database write |
+| [`idempotency-keys`](skills/idempotency-keys/SKILL.md) | accept retried POSTs or agent tool calls without double orders, charges or emails |
 | [`rate-limiting`](skills/rate-limiting/SKILL.md) | throttle APIs, logins or LLM endpoints per tenant or user |
 | [`service-hardening`](skills/service-hardening/SKILL.md) | ship an API to Docker/Kubernetes without deploy-time 502s or hangs |
 | [`llm-gateway`](skills/llm-gateway/SKILL.md) | control LLM cost, add caching or fall back when a provider fails |
@@ -117,7 +145,7 @@ reference code, the properties that must be proven by tests, and the mistakes it
 npm install
 npm run verify:up      # Postgres 17 + pgvector and Redis 7 in Docker
 npm test               # reference code vs real infrastructure
-node bench/run.ts      # performance numbers
+npm run bench:docker -- bench/compare/webhook-claim.ts   # one approach comparison
 npm run verify:down
 ```
 

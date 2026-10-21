@@ -41,12 +41,34 @@ export interface RelayOptions {
   pool: pg.Pool;
   publish: Publish;
   batchSize?: number; // default 100
+  /**
+   * A publish that hasn't settled after this long counts as failed (default 10 s). Without it, one hung
+   * broker call keeps the relay's transaction and advisory lock forever: every relay instance skips and
+   * the outbox silently stops. A timed-out publish may still land later — consumers dedup by message id.
+   */
+  publishTimeoutMs?: number;
 }
 
 // Arbitrary constant; one relay holds it at a time.
 const RELAY_LOCK_KEY = 0x6f7574626f78; // "outbox"
 
 export function createRelay(o: RelayOptions) {
+  const publishTimeoutMs = o.publishTimeoutMs ?? 10_000;
+
+  async function publishWithTimeout(msg: OutboxMessage): Promise<void> {
+    let timer: NodeJS.Timeout | undefined;
+    const call = Promise.resolve().then(() => o.publish(msg)); // a synchronous throw becomes a rejection
+    call.catch(() => {}); // the race loser may reject later
+    const timeout = new Promise<never>((_, reject) => {
+      timer = setTimeout(() => reject(new Error(`publish timeout after ${publishTimeoutMs} ms`)), publishTimeoutMs);
+    });
+    try {
+      await Promise.race([call, timeout]);
+    } finally {
+      clearTimeout(timer);
+    }
+  }
+
   /**
    * Publishes pending messages in commit order. A transaction-scoped advisory lock makes this
    * single-active across instances, which is what preserves ordering (with competing relays,
@@ -55,7 +77,14 @@ export function createRelay(o: RelayOptions) {
    */
   async function relayOnce(): Promise<number> {
     const client = await o.pool.connect();
-    let published = 0;
+    // pg emits 'error' on a checked-out client whose connection dies between queries: here, while a slow
+    // publish runs and idle_in_transaction_session_timeout or a failover ends the session. Unheard, that
+    // crashes the process; heard, this run fails, the batch is re-published next time, consumers dedup.
+    let lost: Error | undefined;
+    const onLost = (err: Error) => {
+      lost = err;
+    };
+    client.on('error', onLost);
     try {
       await client.query('BEGIN');
       const lock = await client.query(`SELECT pg_try_advisory_xact_lock($1) AS ok`, [RELAY_LOCK_KEY]);
@@ -68,26 +97,34 @@ export function createRelay(o: RelayOptions) {
          FROM outbox WHERE published_at IS NULL ORDER BY seq LIMIT $1`,
         [o.batchSize ?? 100],
       );
+      const published: string[] = [];
+      let failure: { id: string; error: string } | undefined;
       for (const msg of rows) {
         try {
-          await o.publish(msg);
+          await publishWithTimeout(msg);
         } catch (err) {
-          await client.query(`UPDATE outbox SET attempts = attempts + 1, last_error = $2 WHERE id = $1`, [
-            msg.id,
-            String(err instanceof Error ? err.message : err).slice(0, 2000),
-          ]);
+          failure = { id: msg.id, error: String(err instanceof Error ? err.message : err).slice(0, 2000) };
           break; // keep order: retry this message first next time
         }
-        await client.query(`UPDATE outbox SET published_at = now(), last_error = NULL WHERE id = $1`, [msg.id]);
-        published++;
+        published.push(msg.id);
+      }
+      // One UPDATE for the batch, not one per message: 8× the relay throughput (docs/performance.md).
+      // Same crash behaviour as before: marks only become durable at COMMIT either way, so a crash
+      // mid-batch re-publishes the batch and consumers dedup by message id.
+      if (published.length) {
+        await client.query(`UPDATE outbox SET published_at = now(), last_error = NULL WHERE id = ANY($1::uuid[])`, [published]);
+      }
+      if (failure) {
+        await client.query(`UPDATE outbox SET attempts = attempts + 1, last_error = $2 WHERE id = $1`, [failure.id, failure.error]);
       }
       await client.query('COMMIT');
-      return published;
+      return published.length;
     } catch (e) {
       await client.query('ROLLBACK').catch(() => {});
       throw e;
     } finally {
-      client.release();
+      client.off('error', onLost);
+      client.release(lost);
     }
   }
 
@@ -106,6 +143,11 @@ export async function consumeOnce(
   apply: (tx: pg.PoolClient) => Promise<void>,
 ): Promise<'applied' | 'duplicate'> {
   const client = await pool.connect();
+  let lost: Error | undefined; // as in relayOnce: a connection dying mid-apply fails this call, not the process
+  const onLost = (err: Error) => {
+    lost = err;
+  };
+  client.on('error', onLost);
   try {
     await client.query('BEGIN');
     const ins = await client.query(
@@ -123,7 +165,8 @@ export async function consumeOnce(
     await client.query('ROLLBACK').catch(() => {});
     throw e;
   } finally {
-    client.release();
+    client.off('error', onLost);
+    client.release(lost);
   }
 }
 

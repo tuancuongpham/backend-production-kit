@@ -27,7 +27,7 @@ Start from [references/server.ts](references/server.ts) (node:http; wrap Express
 3. **Cancellation**: `ctx.signal` aborts when the client disconnects. Thread it into queries and LLM calls so abandoned requests stop costing money (this matters most for LLM streaming).
 4. **Load shedding**: an in-flight counter. Beyond `maxInFlight`, reply `503` immediately. Fast rejection keeps latency bounded for the requests you do accept; that *is* backpressure at the HTTP layer. Pair it with the `rate-limiting` skill for per-tenant fairness.
 5. **Probes**: `/livez` checks the process only, with **no dependency checks** (otherwise a DB blip restarts every pod at once). `/readyz` runs dependency checks with a timeout and returns 503 while draining.
-6. **Body limits**: `readBody(req, maxBytes)` checks `content-length` first, then counts while streaming. Return 413, not an out-of-memory crash.
+6. **Body limits**: `readBody(req, maxBytes)` checks `content-length` first, then counts while streaming. Return 413, not an out-of-memory crash. Make sure the client actually *receives* the 413. Out of the box, Node either keeps reading and discarding the rest of the upload so it can reuse the connection, or closes a socket that still has unread upload data. In that case the kernel answers with a reset that wipes out the 413, and the client sees `ECONNRESET` and retries the whole upload. The reference stops reading, sends the 413 with `Connection: close`, ends the socket gracefully and destroys it after `rejectLingerMs` (2 s): the client gets its 413, and the server reads under 8 MB of a 32 MB upload.
 7. **Request ids**: accept a well-formed `x-request-id` or generate one; echo it, log it, put it on spans.
 8. **Graceful shutdown** via `installSignalHandlers(shutdown)`: readiness → 503 → wait `drainDelayMs` → stop accepting + close idle keep-alive sockets → wait for in-flight up to `shutdownGraceMs` → force-close → `onShutdown` hooks (DB pools, telemetry flush). A second signal force-exits. In Docker, run node as PID 1 with `exec`/`--init`, or `tini`, so SIGTERM actually reaches it.
 9. **Config validation at startup**: fail fast on missing env vars, before readiness ever turns green.
@@ -42,6 +42,7 @@ The full go-live list is in [references/checklist.md](references/checklist.md).
 - `maxInFlight: 2` with 5 concurrent → exactly two 200s and three 503s, and the 503s are immediate (< 150 ms).
 - Client abort → the handler's signal fires, with the request id preserved.
 - Handler throws → 500, the server keeps serving; oversize body → 413; malformed incoming request ids are replaced.
+- A 32 MB upload, chunked or with a declared `Content-Length`, gets a 413 response (not a reset), and the server reads less than 8 MB of it ([latent-bugs-round2.test.ts](../../verify/tests/latent-bugs-round2.test.ts)).
 - Readiness follows dependency checks while liveness doesn't.
 
 Then **load-test** the real service (k6/autocannon) at 2× expected peak. Record p50/p95/p99, error rate and the in-flight cap where shedding starts; the `adr-writer` benchmark template has the format. Finally, do a rolling deploy under load and confirm zero 5xx caused by the deploy.
@@ -55,3 +56,4 @@ ADR: in-flight cap (with its load-test evidence), timeout values, and shutdown t
 - `npm start` as PID 1: npm doesn't forward SIGTERM, so the pod gets SIGKILLed after 30 s.
 - Dependency checks in liveness: one DB hiccup becomes a cluster-wide restart.
 - Retrying 503s without jitter or backoff on the client side, which amplifies overload.
+- Rejecting an oversized upload by destroying the request: the client gets a connection reset instead of a 413, can't tell "too big" from "network blip", and retries the same upload.

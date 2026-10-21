@@ -26,6 +26,7 @@ Reference: [references/sse.ts](references/sse.ts).
 3. **Cancellation**: `openSse()` exposes `signal`, which aborts on client disconnect. Pass it **into the LLM SDK call**, so the provider stops generating. Leaving the loop is not enough, because the provider may still bill the rest.
 4. **Tokens**: `streamTokens(sse, iterable)` uses lossless `send()`, which awaits `drain` when the socket buffer is full. Backpressure propagates to the token iterator, so you never build an unbounded queue. It ends with a `done` event (usage, finish reason) and measures TTFT.
 5. **Live feeds**: give each event a monotonically increasing `id`. `serveFeed()` subscribes **first**, then replays what came after `Last-Event-ID`, then follows live, deduping by id so nothing published during the replay is lost. If the client is older than the buffer, send `reset` and let the client re-fetch full state, instead of leaving a silent gap. Use lossy `trySend()` for high-rate dashboard updates and send the latest snapshot when the client catches up.
+   A subscriber that stops reading must not queue events forever: `serveFeed(sse, feed, { maxQueue })` drops a client more than `maxQueue` events behind (default 1,000, the replay buffer's size) and calls `onOverflow`. Its browser reconnects with `Last-Event-ID` and gets either a replay or a `reset`. Without the cap, one stalled tab buffered 40 MB in the test.
 6. **Limits**: browsers allow 6 HTTP/1.1 connections per origin. Serve over HTTP/2, or multiplex channels on one stream per tab. Cap concurrent streams per user and tenant, and include streams in the server's in-flight accounting (`service-hardening`). A long-lived stream counts as one in-flight request for its whole life, so size `maxInFlight` with that in mind, or exempt streams and cap them separately.
 7. **Metrics**: TTFT p50/p95, tokens/s, active streams, disconnects before `done`, refused lossy sends.
 
@@ -38,6 +39,7 @@ Reference: [references/sse.ts](references/sse.ts).
 - A client older than the replay buffer gets `reset`, not a gap.
 - Heartbeat comments arrive.
 - A stalled client (never reads) makes `trySend` refuse, and the buffered bytes stay bounded.
+- A stalled feed subscriber is disconnected once it is `maxQueue` events behind, instead of buffering every event ([latent-bugs-round2.test.ts](../../verify/tests/latent-bugs-round2.test.ts)).
 
 Manually: throttle the network in browser devtools and toggle offline; the UI should resume without duplicate or missing tokens. Behind the real proxy or CDN, confirm tokens arrive incrementally rather than all at once at the end (a buffering proxy).
 
@@ -50,3 +52,4 @@ ADR: SSE vs WebSocket, replay store, lossless vs lossy per stream type, connecti
 - `res.write` in a loop without checking its return value: memory grows per slow client.
 - Event ids that aren't monotonic per channel (random UUIDs), so replay can't work.
 - Replaying *before* subscribing: events published in between are lost.
+- A per-client queue with no limit between the feed and a slow socket: memory grows with every event the stalled client hasn't read.

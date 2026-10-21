@@ -1,0 +1,69 @@
+{
+  "name": "semantic-cache",
+  "date": "2026-10-21T20:14:41.106Z",
+  "node": "v24.22.1",
+  "rows": 17020,
+  "hnswBuildSeconds": 26.2,
+  "lookups": [
+    {
+      "scope": "big tenant (5,020 rows)",
+      "strategy": "A. HNSW + WHERE scope (v0.2.0)",
+      "hit rate": "4/20",
+      "p50 ms": 0.809,
+      "p95 ms": 1.72,
+      "plan for A": "Limit → Index Scan (llm_semantic_cache_vec_idx)"
+    },
+    {
+      "scope": "big tenant (5,020 rows)",
+      "strategy": "B. HNSW + iterative scan",
+      "hit rate": "20/20",
+      "p50 ms": 2.265,
+      "p95 ms": 3.666,
+      "plan for A": ""
+    },
+    {
+      "scope": "big tenant (5,020 rows)",
+      "strategy": "C. exact within scope (default)",
+      "hit rate": "20/20",
+      "p50 ms": 8.391,
+      "p95 ms": 9.67,
+      "plan for A": ""
+    },
+    {
+      "scope": "small tenant (120 rows)",
+      "strategy": "A. HNSW + WHERE scope (v0.2.0)",
+      "hit rate": "20/20",
+      "p50 ms": 0.517,
+      "p95 ms": 1.059,
+      "plan for A": "Limit → Sort → Index Scan (llm_semantic_cache_scope_idx)"
+    },
+    {
+      "scope": "small tenant (120 rows)",
+      "strategy": "B. HNSW + iterative scan",
+      "hit rate": "20/20",
+      "p50 ms": 1.703,
+      "p95 ms": 2.282,
+      "plan for A": ""
+    },
+    {
+      "scope": "small tenant (120 rows)",
+      "strategy": "C. exact within scope (default)",
+      "hit rate": "20/20",
+      "p50 ms": 0.45,
+      "p95 ms": 0.652,
+      "plan for A": ""
+    }
+  ],
+  "writes": [
+    {
+      "cache save": "with HNSW index",
+      "p50 ms": 9.179,
+      "p95 ms": 11.194
+    },
+    {
+      "cache save": "without HNSW index",
+      "p50 ms": 1.243,
+      "p95 ms": 1.811
+    }
+  ]
+}

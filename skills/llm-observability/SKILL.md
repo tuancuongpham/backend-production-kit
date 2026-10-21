@@ -23,6 +23,7 @@ Use OpenTelemetry as the backbone, because it is vendor-neutral and auto-instrum
 
 1. **Bootstrap**: [references/otel-setup.ts](references/otel-setup.ts), loaded with `node --import`, before app code. Auto-instrumentations cover HTTP in/out, `pg`, `ioredis`, `undici`. Export to a collector ([references/collector.yaml](references/collector.yaml)) so apps don't hold vendor keys, and so scrubbing and sampling live in one place. Register `sdk.shutdown()` as a shutdown hook (`service-hardening`) so final spans are flushed.
 2. **LLM spans**: wrap every model call in `withLlmSpan(tracer, info, fn, { redact })` from [references/llm-tracing.ts](references/llm-tracing.ts). It records the model, parameters, tenant, feature, prompt name/version, redacted input/output messages, token usage, cost, cache status and finish reason. Errors mark the span and are rethrown. If you use the `llm-gateway`, wrap `gateway.chat`; its result already carries cost, cache and fallback info.
+   Content attributes are cut at `maxContentChars` (default 32 KiB) with a `…[TRUNCATED n chars]` marker. A long RAG context otherwise becomes a single 240 KB attribute: every span is held in memory until export, and collectors and backends with size limits drop or truncate exactly those large, interesting traces. Raise the limit per feature if you need full prompts; keep a bound.
 3. **Retrieval spans**: wrap RAG retrieval in `withRetrievalSpan`. It records chunk ids, **document versions** and ranks (`multitenant-postgres` returns `semantic_rank`/`keyword_rank`). "The answer was right for last month's policy doc" is a common root cause, and only versions reveal it.
 4. **Async hops**: when work leaves the request (outbox, webhook inbox, queue, cron), call `injectTraceContext()` into the message headers on the producer side, and `runWithTraceContext(headers, …)` in the worker. One user action stays one trace even when the LLM runs minutes later.
 5. **Expose the trace id**: return `currentTraceId()` as an `x-trace-id` response header and store it on the `llm_usage` row. Support and FinOps can then jump from a complaint or a cost spike straight to the trace.
@@ -35,6 +36,7 @@ Use OpenTelemetry as the backbone, because it is vendor-neutral and auto-instrum
 - The LLM span carries model, tokens, cost, tenant and prompt version; the prompt includes the retrieved chunk ids; **emails and card numbers are redacted** in input, output and retrieval query (integration with the `pii-redaction` redactor).
 - Retrieval span lists `documentId@version` for each chunk.
 - `captureContent: false` stores no text but keeps the metrics.
+- A 240 KB prompt is stored as at most 32 KiB per attribute, marked as truncated ([latent-bugs-round2.test.ts](../../verify/tests/latent-bugs-round2.test.ts)).
 - An error sets status ERROR with an exception event and rethrows.
 - Trace context survives an async hop: the consumer span has the producer's trace id and parent span id.
 
@@ -49,3 +51,4 @@ ADR: backends and collector topology, content capture policy per feature, sampli
 - Recording the prompt template but not the filled values or retrieved chunks: you still can't reproduce the answer.
 - Dropping trace context at the queue boundary: the slow, expensive part of the flow becomes an orphan trace.
 - No `sdk.shutdown()` on exit: the spans from the crash you're investigating never arrive.
+- Unbounded prompt attributes: the biggest RAG requests, the ones most likely to go wrong, are the spans that get dropped.

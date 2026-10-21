@@ -1,5 +1,81 @@
 # Changelog
 
+## 0.3.0 — 2026-10-21
+
+### New skill: `idempotency-keys`
+Stripe-style `Idempotency-Key` handling in Postgres for retried POSTs and agent tool calls. A retry gets the
+first response back instead of a second order, charge or email. A duplicate arriving mid-flight gets 409, and a key
+reused for another request gets 422.
+- `runIdempotent` covers effects in the same database: claim, effect and stored response commit in one
+  transaction, so a crash leaves nothing behind.
+- `runIdempotentExternal` covers payment providers and other services: the claim commits first, the handler gets a
+  `downstreamKey`, and a claim left by a dead process is taken over after `staleAfterSec`.
+- 11 tests against real Postgres, including 20 concurrent copies of one request, a connection killed mid-handler,
+  and a process that died after charging.
+- Benchmarked against the two versions agents usually write:
+  - check-then-insert ran the handler 20 times for 20 duplicates;
+  - insert-and-wait held about 4 s of pooled connections;
+  - the shipped try-lock answers duplicates with 409 in 8 ms and holds 0.13 s.
+
+### Fixed — latent bugs, round 2
+Each bug was reproduced by a failing test first (`verify/tests/latent-bugs-round2.test.ts`), then fixed.
+- `llm-gateway`: with an HNSW index, the semantic cache filtered by tenant *after* the index returned its 40
+  nearest rows across all tenants. A question many tenants had cached crowded out this tenant's own entry: 4 hits
+  out of 20 for a big tenant, each miss a paid model call. Search is now exact within the scope by default, and
+  `semanticSearch: 'ann'` uses pgvector 0.8 iterative scans.
+- `webhook-ingestion`: the claim's `pending OR stuck` filter couldn't use either index's order, so every claim
+  sorted the whole due backlog: 56 ms per claim at 200,000 events due. Two index-ordered branches now keep it at
+  0.6 ms regardless of backlog.
+- `outbox-pattern`: a publish call that never returned held the relay's transaction and advisory lock forever,
+  silently stopping all delivery. New `publishTimeoutMs` (default 10 s).
+- `service-hardening`: oversized uploads got a connection reset instead of the 413 (chunked and declared
+  length), so clients retried the whole upload. The server now stops reading, delivers the 413 with
+  `Connection: close`, and closes after `rejectLingerMs`.
+- `sse-streaming`: a stalled feed subscriber buffered every event (40 MB in the test). `serveFeed` now drops a
+  client more than `maxQueue` events behind; it reconnects with `Last-Event-ID`.
+- `rate-limiting`: `refillPerSec: 0` made the Lua script divide by zero, so every check errored and the limiter
+  ran in its failure mode. Non-positive or non-finite `capacity`/`refillPerSec` are rejected at startup.
+- `llm-observability`: prompt and response attributes were unbounded (a 240 KB RAG prompt became one attribute).
+  New `maxContentChars` (default 32 KiB) with a truncation marker.
+- Retention: `pruneInbox` (done rows only, never dead letters, window longer than the provider's retry period)
+  and `pruneLlmCache` delete in batches through new indexes; the tables used to grow forever.
+- Every function that checks a client out of the pool crashed the **whole Node process** when Postgres ended the
+  connection between two queries. That covered `withTenant`, `relayOnce`, `consumeOnce`, the webhook worker, the
+  `ann` cache lookup and the agent DB tool. The trigger can be a failover, `pg_terminate_backend`, or
+  `idle_in_transaction_session_timeout` during a slow handler or publish.
+  - Cause: node-postgres emits `error` on the checked-out client, and nothing listened.
+  - Fix: each function now listens while it holds the client. Only that request fails, and the pool drops the dead
+    client.
+  - Tests: `verify/tests/connection-loss.test.ts` kills the connection inside each one, and it fails without the fix.
+  - The service-hardening checklist now also requires `pool.on('error')`; an idle pooled client hits the same crash.
+
+### Performance — approach comparisons (`bench/compare/`, tables in docs/performance.md)
+Each hot path's alternatives were measured side by side inside the Docker network, and the winner shipped:
+- Embeddings are sent as binary parameters (`vectorParam`) in `llm-gateway` and `multitenant-postgres`: about 3×
+  faster lookups and inserts, 6 KB instead of 32 KB per 1536-dim vector, identical results.
+- `llm_semantic_cache.embedding` is stored in the row (`SET STORAGE MAIN`): exact search 2–3× faster. Combined
+  with binary parameters, a small-scope lookup went from 2.1 ms to 0.46 ms.
+- The HNSW index on the semantic cache is now opt-in: it made every cache save 7× slower and the default search
+  never uses it.
+- `webhook-ingestion`: new `worker.run({ loops, signal })`, with independent loops and a graceful stop that
+  finishes claimed rows. It drains 1.8× faster than lanes over one batch when some handlers are slow.
+- `outbox-pattern`: one `UPDATE` per batch instead of per message: 8.3× relay throughput, same crash behaviour.
+- `llm-gateway`: budget reservation is one conditional upsert instead of two statements: 20% lower latency,
+  37% more throughput, still exact under contention.
+- `multitenant-postgres`: `withTenant` sends `BEGIN` and `set_config` in one round trip (the tenant id is
+  validated as a UUID first, and a test feeds it injection strings), 19% faster per request. Measured that RLS
+  itself costs about nothing with a `STABLE` function, and 380× more with a `VOLATILE` one; the skill now warns.
+- Measured and kept as they were: the rate limiter's ioredis defaults (auto-pipelining was 11% slower for
+  `EVALSHA`) and per-detector redaction with hints (1.3–4.7× faster than the alternatives).
+- Found while measuring: from the host, Docker Desktop's port forwarder adds ~44 ms to every message of 16 KB or
+  more. New `npm run bench:docker` runs database benchmarks inside the Docker network.
+
+### Docs
+- `docs/performance.md`: every comparison with its table, query plans and trade-offs.
+- `docs/roadmap.md`: skills that would fit next to these (a Postgres job queue, zero-downtime migrations, LLM
+  tool safety, and more), with the proof each would need. Its first entry, `idempotency-keys`, ships in this release.
+- README: the new production bugs and a "measured against the alternatives" table.
+
 ## 0.2.0 — 2026-10-21
 
 ### Fixed — latent bugs in the reference code

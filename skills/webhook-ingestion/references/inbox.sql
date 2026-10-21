@@ -20,6 +20,8 @@ CREATE TABLE IF NOT EXISTS webhook_inbox (
 -- Worker claim paths: ready-to-run rows, and rows stuck in 'processing' after a crash.
 CREATE INDEX IF NOT EXISTS webhook_inbox_ready_idx ON webhook_inbox (next_attempt_at) WHERE status = 'pending';
 CREATE INDEX IF NOT EXISTS webhook_inbox_stuck_idx ON webhook_inbox (locked_at) WHERE status = 'processing';
+-- Retention (pruneInbox): processed rows by age, so each batch is an index range, not a table scan.
+CREATE INDEX IF NOT EXISTS webhook_inbox_done_idx ON webhook_inbox (processed_at) WHERE status = 'done';
 -- Dead-letter view for dashboards/alerts.
 CREATE OR REPLACE VIEW webhook_dead_letters AS
   SELECT id, provider, event_id, event_type, attempts, last_error, received_at

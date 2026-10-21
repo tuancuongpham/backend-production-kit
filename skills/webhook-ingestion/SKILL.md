@@ -39,22 +39,29 @@ replay CLI → dead → pending          reconcile cron → provider API → ing
    **Redirect/return URLs** (VNPay `vnp_ReturnUrl`, Stripe success URL) are user-controlled and must be **read-only**: show status, never credit. Otherwise they become a second, unsigned path to double-credit.
 3. **Handlers.** Register them as `'provider:event_type'` (or `'provider:*'`). Each handler gets the transaction client, so DB side effects and the "done" mark commit together. For external side effects (send email, call an API), pass an idempotency key such as `` `${provider}:${event_id}` ``.
    **Ordering:** events can arrive out of order, for example `refund` before `payment.succeeded`. Make handlers state-based: re-fetch the object from the provider API, or compare `event.created`/version with what's stored and ignore older events.
-   **Throughput:** handlers are I/O-bound, so process a claimed batch in parallel with `concurrency` (4–8). With ~5 ms handlers, 200 events drained in 454 ms instead of 3.2 s. This is safe only when handlers lock or conditionally update the object they change (state-based, as above), because two events for the same order can now run at the same time.
-4. **Worker.** Call `createInboxWorker(...).processOnce()` on an interval. Optionally wake it with `LISTEN/NOTIFY`, keeping polling as the fallback. Several instances are safe thanks to `SKIP LOCKED`. Rows stuck in `processing` after a crash are re-claimed after `stuckAfterSec`.
+   **Throughput:** handlers are I/O-bound, so run several at once. With ~5 ms handlers, 8 loops drain 200 events in about 0.2 s instead of 1.5 s for one. This is safe only when handlers lock or conditionally update the object they change (state-based, as above), because two events for the same order can now run at the same time.
+4. **Worker.** Start `createInboxWorker(...).run({ loops: 4–8, signal })` in the worker process:
+   - **Independent loops, small batches** (`batchSize` 2–5). A batch processed in parallel lanes (`concurrency`) finishes only when its slowest row does. When 1 handler in 20 waited 200 ms on a provider, 8 independent loops drained 200 events in 0.58 s; one loop with 8 lanes over 50-row batches needed 1.04 s.
+   - **Graceful stop.** On SIGTERM, abort `signal` and `await` the returned promise in the shutdown hook (`service-hardening`). The loops finish the rows they claimed instead of leaving them in `processing` until `stuckAfterSec`.
+   - **Several instances are safe** thanks to `SKIP LOCKED`. Rows stuck in `processing` after a crash are re-claimed after `stuckAfterSec`.
+   - **The claim stays cheap under a backlog.** It takes stuck rows, then due rows, each through its own partial index in order: about 0.6 ms with 200,000 events due.
+   - `processOnce()` is the single tick underneath, for tests and custom schedulers. Optionally wake the loops with `LISTEN/NOTIFY`; keep polling (`idleMs`) as the fallback.
 5. **DLQ + replay.** The `webhook_dead_letters` view feeds a dashboard or alert. Wrap `replay()` in a CLI or admin endpoint, by ids, provider or type, so it can be used after a fix ships. Ship it as code; a SQL snippet in the README is not a replay tool at 3 a.m.
 6. **Reconciliation.** Run `reconcile(pool, listFromProvider(since))` on a schedule. Export `missed` as a metric; consistently > 0 means webhook delivery is broken.
-7. Trace context: put `traceparent` into the payload or headers you store, so processing joins the original request trace (see `llm-observability`).
+7. **Retention.** Run `pruneInbox(pool, { olderThanDays: 30 })` daily. It deletes `done` rows in batches through a partial index and never touches dead letters. The window must be longer than the provider's retry period (Stripe retries for 3 days), because a deleted row is a forgotten dedup key.
+8. Trace context: put `traceparent` into the payload or headers you store, so processing joins the original request trace (see `llm-observability`).
 
 ## Verification (required)
 
-Against real Postgres. [verify/tests/webhook-ingestion.test.ts](../../verify/tests/webhook-ingestion.test.ts) covers:
+Against real Postgres. [verify/tests/webhook-ingestion.test.ts](../../verify/tests/webhook-ingestion.test.ts) and the regression tests in [latent-bugs-round2.test.ts](../../verify/tests/latent-bugs-round2.test.ts) cover:
 - Signatures: valid passes; tampered body, wrong secret, stale timestamp, missing or malformed header, and wrong-length hex all fail.
 - The same event delivered twice → 1 row, handler effect applied once, including when the duplicate arrives *after* processing.
 - A handler that writes then throws → the write is rolled back; status `pending`, `attempts` 1, `next_attempt_at` in the future; not re-run before due; eventually `done`.
 - After `maxAttempts` → `dead`, `onDead` fires, the DLQ view shows it; `replay` → processed successfully.
 - 4 concurrent workers × 60 events → exactly 60 effects, all `done`.
-- A row stuck in `processing` with an old `locked_at` is re-claimed. Unknown event type → acknowledged as `ignored`.
-- Reconciliation ingests only missing events and reports the count.
+- A row stuck in `processing` with an old `locked_at` is re-claimed. One claim takes the stuck row and due rows, never more than `batchSize` in total. Unknown event type → acknowledged as `ignored`.
+- `run()` with 4 loops processes 4 events at once; aborting it mid-batch leaves no row in `processing`, and a restart drains the rest with each event applied once.
+- Reconciliation ingests only missing events and reports the count. `pruneInbox` deletes old `done` rows only, never recent ones or dead letters.
 
 How to write these tests so they prove something:
 - **Sign test payloads with the provider's own tooling**: Stripe's `stripe.webhooks.generateTestHeaderString`, or a payload and signature captured from the provider's sandbox. A test that signs with the same HMAC code the verifier uses passes even when both share a bug (wrong field order, wrong encoding).
@@ -72,3 +79,6 @@ ADR: inbox-in-Postgres vs broker, retry policy, ordering strategy, reconciliatio
 - Returning 500 for duplicates or unknown types: the provider retries forever.
 - Comparing signatures with `===`, which leaks timing.
 - No reconciliation: the one missed `payment.succeeded` becomes a support ticket a week later.
+- One claim query for "pending OR stuck" sorted by time. Postgres can't use either index's order for an `OR`, so every claim fetches and sorts the whole due backlog: 1 ms with 2,000 events due, 56 ms with 200,000. The worker slows down exactly when it has the most to catch up on.
+- Stopping workers without waiting for them: every deploy strands the claimed rows in `processing` for `stuckAfterSec`.
+- Deleting processed rows sooner than the provider's retry window: a late redelivery is no longer recognized as a duplicate.

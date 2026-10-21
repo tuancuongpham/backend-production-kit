@@ -182,6 +182,13 @@ export function createAgentDb(opts: AgentDbOptions) {
 
     const maxRows = Math.min(tool.maxRows ?? opts.maxRows ?? 200, opts.maxRows ?? 200);
     const client = await pool.connect();
+    // pg emits 'error' on a checked-out client whose connection dies between queries (failover);
+    // unheard, that crashes the process instead of failing this tool call.
+    let lost: Error | undefined;
+    const onLost = (err: Error) => {
+      lost = err;
+    };
+    client.on('error', onLost);
     try {
       await client.query('BEGIN READ ONLY');
       await client.query(
@@ -199,7 +206,8 @@ export function createAgentDb(opts: AgentDbOptions) {
       await client.query('ROLLBACK').catch(() => {});
       return fail(e);
     } finally {
-      client.release();
+      client.off('error', onLost);
+      client.release(lost);
     }
   }
 

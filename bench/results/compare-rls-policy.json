@@ -1,0 +1,56 @@
+{
+  "name": "rls-policy",
+  "date": "2026-10-21T20:01:59.902Z",
+  "node": "v24.22.1",
+  "rows": 200000,
+  "tenants": 200,
+  "policies": [
+    {
+      "policy": "1. current_tenant_id() (shipped)",
+      "count(*) p50 ms": 0.316,
+      "top-20 page p50 ms": 1.394,
+      "plan for count(*)": "Aggregate → Index Only Scan (documents_tenant_id_id_key)"
+    },
+    {
+      "policy": "2. (SELECT current_tenant_id())",
+      "count(*) p50 ms": 0.288,
+      "top-20 page p50 ms": 1.405,
+      "plan for count(*)": "Aggregate → Result → Index Only Scan (documents_tenant_id_id_key)"
+    },
+    {
+      "policy": "3. expression written out",
+      "count(*) p50 ms": 0.252,
+      "top-20 page p50 ms": 1.284,
+      "plan for count(*)": "Aggregate → Index Only Scan (documents_tenant_id_id_key)"
+    },
+    {
+      "policy": "4. plpgsql VOLATILE function",
+      "count(*) p50 ms": 119.841,
+      "top-20 page p50 ms": 121.875,
+      "plan for count(*)": "Aggregate → Seq Scan"
+    },
+    {
+      "policy": "no RLS, explicit WHERE (baseline)",
+      "count(*) p50 ms": 0.255,
+      "top-20 page p50 ms": 1.47,
+      "plan for count(*)": "Aggregate → Index Only Scan (documents_tenant_id_id_key)"
+    }
+  ],
+  "requests": [
+    {
+      "request shape": "A. BEGIN / set_config / query / COMMIT",
+      "p50 ms": 0.594,
+      "p95 ms": 0.824
+    },
+    {
+      "request shape": "B. \"BEGIN; set_config\" in one call / query / COMMIT",
+      "p50 ms": 0.479,
+      "p95 ms": 0.687
+    },
+    {
+      "request shape": "floor: one query, explicit WHERE, no RLS",
+      "p50 ms": 0.186,
+      "p95 ms": 0.29
+    }
+  ]
+}

@@ -1,0 +1,41 @@
+{
+  "name": "vector-storage",
+  "date": "2026-10-21T20:07:30.072Z",
+  "node": "v24.22.1",
+  "dims": 1536,
+  "scopes": {
+    "scope-120": 120,
+    "scope-1000": 1000,
+    "scope-5000": 5000
+  },
+  "background": 10000,
+  "rows": [
+    {
+      "storage": "A. vector, default (TOAST)",
+      "scope-120 p50 ms": 0.726,
+      "scope-1000 p50 ms": 4.358,
+      "scope-5000 p50 ms": 20.263,
+      "same top-1 as A": "20/20",
+      "table + TOAST + indexes": "130 MB",
+      "insert p50 ms": 1.542
+    },
+    {
+      "storage": "B. vector, STORAGE MAIN",
+      "scope-120 p50 ms": 0.338,
+      "scope-1000 p50 ms": 1.495,
+      "scope-5000 p50 ms": 8.883,
+      "same top-1 as A": "20/20",
+      "table + TOAST + indexes": "128 MB",
+      "insert p50 ms": 1.308
+    },
+    {
+      "storage": "C. halfvec, STORAGE MAIN",
+      "scope-120 p50 ms": 0.475,
+      "scope-1000 p50 ms": 1.198,
+      "scope-5000 p50 ms": 6.384,
+      "same top-1 as A": "20/20",
+      "table + TOAST + indexes": "65 MB",
+      "insert p50 ms": 1.369
+    }
+  ]
+}

@@ -1,0 +1,109 @@
+{
+  "name": "webhook-claim",
+  "date": "2026-10-21T20:07:57.130Z",
+  "node": "v24.22.1",
+  "doneRows": 300000,
+  "claims": [
+    {
+      "due backlog": "2,000",
+      "claim": "v0.2.0: pending OR stuck",
+      "p50 ms": 1.162,
+      "p95 ms": 1.798,
+      "plan": "ModifyTable → Nested Loop → Aggregate → Subquery Scan → Limit → LockRows → Sort → Bitmap Heap Scan → BitmapOr → Bitmap Index Scan (webhook_inbox_ready_idx) → Bitmap Index Scan (webhook_inbox_stuck_idx) → Index Scan (webhook_inbox_pkey)"
+    },
+    {
+      "due backlog": "2,000",
+      "claim": "v0.3.0: stuck branch + due branch",
+      "p50 ms": 0.582,
+      "p95 ms": 0.94,
+      "plan": "ModifyTable → Nested Loop → Aggregate → Subquery Scan → Limit → Append → Subquery Scan → Limit → LockRows → Index Scan (webhook_inbox_stuck_idx) → Subquery Scan → Limit → LockRows → Index Scan (webhook_inbox_ready_idx) → Index Scan (webhook_inbox_pkey)"
+    },
+    {
+      "due backlog": "50,000",
+      "claim": "v0.2.0: pending OR stuck",
+      "p50 ms": 13.949,
+      "p95 ms": 24.615,
+      "plan": "ModifyTable → Nested Loop → Aggregate → Subquery Scan → Limit → LockRows → Sort → Bitmap Heap Scan → BitmapOr → Bitmap Index Scan (webhook_inbox_ready_idx) → Bitmap Index Scan (webhook_inbox_stuck_idx) → Index Scan (webhook_inbox_pkey)"
+    },
+    {
+      "due backlog": "50,000",
+      "claim": "v0.3.0: stuck branch + due branch",
+      "p50 ms": 0.612,
+      "p95 ms": 1.099,
+      "plan": "ModifyTable → Nested Loop → Aggregate → Subquery Scan → Limit → Append → Subquery Scan → Limit → LockRows → Index Scan (webhook_inbox_stuck_idx) → Subquery Scan → Limit → LockRows → Index Scan (webhook_inbox_ready_idx) → Index Scan (webhook_inbox_pkey)"
+    },
+    {
+      "due backlog": "200,000",
+      "claim": "v0.2.0: pending OR stuck",
+      "p50 ms": 55.606,
+      "p95 ms": 96.843,
+      "plan": "ModifyTable → Nested Loop → Aggregate → Subquery Scan → Limit → LockRows → Sort → Bitmap Heap Scan → BitmapOr → Bitmap Index Scan (webhook_inbox_ready_idx) → Bitmap Index Scan (webhook_inbox_stuck_idx) → Index Scan (webhook_inbox_pkey)"
+    },
+    {
+      "due backlog": "200,000",
+      "claim": "v0.3.0: stuck branch + due branch",
+      "p50 ms": 0.581,
+      "p95 ms": 0.976,
+      "plan": "ModifyTable → Nested Loop → Aggregate → Subquery Scan → Limit → Append → Subquery Scan → Limit → LockRows → Index Scan (webhook_inbox_stuck_idx) → Subquery Scan → Limit → LockRows → Index Scan (webhook_inbox_ready_idx) → Index Scan (webhook_inbox_pkey)"
+    }
+  ],
+  "drain": [
+    {
+      "layout": "1 loop, batch 50, concurrency 8",
+      "uniform 5 ms: drain 200, ms": 247,
+      "every 20th 200 ms: drain 200, ms": 1040
+    },
+    {
+      "layout": "1 loop, batch 8, concurrency 8",
+      "uniform 5 ms: drain 200, ms": 275,
+      "every 20th 200 ms: drain 200, ms": 2247
+    },
+    {
+      "layout": "8 loops, batch 1, concurrency 1",
+      "uniform 5 ms: drain 200, ms": 318,
+      "every 20th 200 ms: drain 200, ms": 670
+    },
+    {
+      "layout": "8 loops, batch 4, concurrency 1",
+      "uniform 5 ms: drain 200, ms": 242,
+      "every 20th 200 ms: drain 200, ms": 608
+    },
+    {
+      "layout": "shipped run({ loops: 8 }), batch 4",
+      "uniform 5 ms: drain 200, ms": 214,
+      "every 20th 200 ms: drain 200, ms": 577
+    }
+  ],
+  "concurrency": [
+    {
+      "concurrency": 1,
+      "drain 200 events, ms": 1542,
+      "events/s": 130
+    },
+    {
+      "concurrency": 2,
+      "drain 200 events, ms": 795,
+      "events/s": 252
+    },
+    {
+      "concurrency": 4,
+      "drain 200 events, ms": 477,
+      "events/s": 419
+    },
+    {
+      "concurrency": 8,
+      "drain 200 events, ms": 248,
+      "events/s": 806
+    },
+    {
+      "concurrency": 16,
+      "drain 200 events, ms": 164,
+      "events/s": 1220
+    },
+    {
+      "concurrency": 32,
+      "drain 200 events, ms": 129,
+      "events/s": 1550
+    }
+  ]
+}

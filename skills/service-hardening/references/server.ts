@@ -26,6 +26,8 @@ export interface HardenedServerOptions {
   shutdownGraceMs?: number; // default 20s
   onShutdown?: Array<() => Promise<unknown>>; // close DB pools, flush telemetry...
   log?: (msg: string, extra?: Record<string, unknown>) => void;
+  /** After a 413, how long the connection stays open (not read from) so the client can read the answer. */
+  rejectLingerMs?: number; // default 2s
 }
 
 const sleep = (ms: number) => new Promise<void>((r) => setTimeout(r, ms));
@@ -34,18 +36,72 @@ export class PayloadTooLargeError extends Error {
   status = 413;
 }
 
-/** Read a request body with a hard size cap (check before buffering, not after). */
-export async function readBody(req: http.IncomingMessage, maxBytes: number): Promise<Buffer> {
+/**
+ * Read a request body with a hard size cap (check before buffering, not after).
+ * Event listeners rather than `for await`: throwing out of `for await` destroys the request, and with it
+ * the socket, so the client would get a connection reset (and usually retry) instead of the 413.
+ */
+export function readBody(req: http.IncomingMessage, maxBytes: number): Promise<Buffer> {
   const declared = Number(req.headers['content-length'] ?? 0);
-  if (declared > maxBytes) throw new PayloadTooLargeError(`body exceeds ${maxBytes} bytes`);
-  const chunks: Buffer[] = [];
-  let size = 0;
-  for await (const chunk of req) {
-    size += (chunk as Buffer).length;
-    if (size > maxBytes) throw new PayloadTooLargeError(`body exceeds ${maxBytes} bytes`);
-    chunks.push(chunk as Buffer);
-  }
-  return Buffer.concat(chunks);
+  if (declared > maxBytes) return Promise.reject(new PayloadTooLargeError(`body exceeds ${maxBytes} bytes`));
+  return new Promise((resolve, reject) => {
+    const chunks: Buffer[] = [];
+    let size = 0;
+    const cleanup = () => {
+      req.off('data', onData);
+      req.off('end', onEnd);
+      req.off('error', onError);
+      req.off('close', onClose);
+    };
+    const onData = (chunk: Buffer) => {
+      size += chunk.length;
+      if (size > maxBytes) {
+        cleanup();
+        req.pause();
+        reject(new PayloadTooLargeError(`body exceeds ${maxBytes} bytes`));
+        return;
+      }
+      chunks.push(chunk);
+    };
+    const onEnd = () => {
+      cleanup();
+      resolve(Buffer.concat(chunks));
+    };
+    const onError = (err: Error) => {
+      cleanup();
+      reject(err);
+    };
+    const onClose = () => {
+      if (req.complete) return;
+      cleanup();
+      reject(new Error('request aborted by client'));
+    };
+    req.on('data', onData);
+    req.on('end', onEnd);
+    req.on('error', onError);
+    req.on('close', onClose);
+  });
+}
+
+/**
+ * After rejecting a body: answer, then close the connection without reading the rest of the upload.
+ * - `req.read(0)` marks the body as consumed. Otherwise, after the response, Node drains ("dumps") the
+ *   remaining upload on a keep-alive connection, so one client can make the server read any amount.
+ * - `req.pause()` stops pulling bytes: TCP flow control holds the client back; nothing is read or discarded.
+ * - The socket gets a FIN after the response and is destroyed only after `lingerMs`. Destroying a socket
+ *   that has unread data makes the OS send an RST at once, which can wipe out the 413 before the client
+ *   reads it. That is what Node does for `Connection: close` requests, hence `shouldKeepAlive = true`.
+ */
+function rejectRemainingBody(req: http.IncomingMessage, res: http.ServerResponse, lingerMs: number) {
+  if (req.complete) return;
+  req.read(0);
+  req.pause();
+  res.shouldKeepAlive = true;
+  const socket = req.socket;
+  res.once('finish', () => socket.end());
+  const timer = setTimeout(() => socket.destroy(), lingerMs);
+  timer.unref();
+  socket.once('close', () => clearTimeout(timer));
 }
 
 /** Every outbound call needs a deadline; combine it with the request's cancellation signal. */
@@ -103,6 +159,7 @@ export function createHardenedServer(o: HardenedServerOptions) {
     } catch (err) {
       const status = err instanceof PayloadTooLargeError ? 413 : 500;
       log('request failed', { requestId, status, error: String(err) });
+      if (status === 413 && !res.headersSent) rejectRemainingBody(req, res, o.rejectLingerMs ?? 2000);
       if (!res.headersSent) res.writeHead(status, { 'content-type': 'text/plain' }).end(status === 413 ? 'payload too large' : 'internal error');
       else res.destroy();
     } finally {

@@ -1,0 +1,25 @@
+{
+  "name": "rate-limiter",
+  "date": "2026-10-21T20:02:05.856Z",
+  "node": "v24.22.1",
+  "rows": [
+    {
+      "client": "ioredis defaults",
+      "limiter checks/s, sequential": 6301,
+      "limiter checks/s, 64 concurrent": 57080,
+      "bare EVALSHA/s, 64 concurrent": 72242,
+      "PING/s, 64 concurrent": 73234,
+      "Redis µs per script call": 9.34,
+      "fell back to failure mode": 0
+    },
+    {
+      "client": "enableAutoPipelining: true",
+      "limiter checks/s, sequential": 5908,
+      "limiter checks/s, 64 concurrent": 50681,
+      "bare EVALSHA/s, 64 concurrent": 56339,
+      "PING/s, 64 concurrent": 198910,
+      "Redis µs per script call": 8.65,
+      "fell back to failure mode": 0
+    }
+  ]
+}

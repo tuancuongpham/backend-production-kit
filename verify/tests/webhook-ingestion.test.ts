@@ -145,6 +145,47 @@ describe('webhook-ingestion', () => {
     assert.deepEqual(await worker.processOnce(), ['done']);
   });
 
+  it('one claim takes stuck rows first, then due rows, up to batchSize in total', async () => {
+    for (const id of ['evt_s', 'evt_p1', 'evt_p2', 'evt_p3']) await ingest(pool, evt(id));
+    await pool.query(`UPDATE webhook_inbox SET status = 'processing', attempts = 1, locked_at = now() - interval '1 hour' WHERE event_id = 'evt_s'`);
+    const worker = createInboxWorker({ pool, handlers: { 'stripe:payment.succeeded': creditHandler }, batchSize: 3 });
+    assert.deepEqual(await worker.processOnce(), ['done', 'done', 'done']);
+    const { rows } = await pool.query(`SELECT event_id, status FROM webhook_inbox ORDER BY event_id`);
+    assert.equal(rows.find((r) => r.event_id === 'evt_s').status, 'done');
+    assert.equal(rows.filter((r) => r.status === 'pending').length, 1);
+  });
+
+  it('run(): independent loops drain the inbox, and stopping waits for the rows they claimed', async () => {
+    for (let i = 0; i < 12; i++) await ingest(pool, evt(`evt_r${i}`));
+    let active = 0;
+    let maxActive = 0;
+    const slowCredit: Handler = async (row, tx) => {
+      maxActive = Math.max(maxActive, ++active);
+      await new Promise((r) => setTimeout(r, 40));
+      active--;
+      await creditHandler(row, tx);
+    };
+    const worker = createInboxWorker({ pool, handlers: { 'stripe:payment.succeeded': slowCredit }, batchSize: 2 });
+    const status = async () =>
+      Object.fromEntries((await pool.query(`SELECT status, count(*)::int n FROM webhook_inbox GROUP BY status`)).rows.map((r) => [r.status, r.n]));
+
+    const stop = new AbortController();
+    const running = worker.run({ loops: 4, idleMs: 10, signal: stop.signal });
+    await new Promise((r) => setTimeout(r, 60)); // every loop is busy with its 2-row batch
+    stop.abort(); // a deploy's SIGTERM
+    await running;
+    assert.equal((await status()).processing, undefined, 'no claimed row left stranded in processing');
+    assert.equal(maxActive, 4, 'the loops ran in parallel');
+
+    const again = new AbortController();
+    const restarted = worker.run({ loops: 4, idleMs: 10, signal: again.signal });
+    while ((await status()).pending) await new Promise((r) => setTimeout(r, 10));
+    again.abort();
+    await restarted;
+    assert.deepEqual(await status(), { done: 12 });
+    assert.equal((await pool.query('SELECT count(*)::int n FROM credits')).rows[0].n, 12);
+  });
+
   it('unknown event types are acknowledged, not retried forever', async () => {
     await ingest(pool, evt('evt_5', 'customer.updated'));
     const worker = createInboxWorker({ pool, handlers: { 'stripe:payment.succeeded': creditHandler } });

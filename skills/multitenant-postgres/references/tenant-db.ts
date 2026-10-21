@@ -11,9 +11,21 @@ const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/
 export async function withTenant<T>(pool: pg.Pool, tenantId: string, fn: (client: pg.PoolClient) => Promise<T>): Promise<T> {
   if (!UUID_RE.test(tenantId)) throw new Error('invalid tenant id');
   const client = await pool.connect();
+  // If the server ends this connection between two queries (failover, idle_in_transaction_session_timeout),
+  // pg emits 'error' on the client. Unheard while it is checked out, that crashes the whole process; heard,
+  // only this request fails (its next query rejects) and the pool drops the dead client.
+  let lost: Error | undefined;
+  const onLost = (err: Error) => {
+    lost = err;
+  };
+  client.on('error', onLost);
   try {
-    await client.query('BEGIN');
-    await client.query(`SELECT set_config('app.tenant_id', $1, true)`, [tenantId]);
+    // BEGIN and set_config in one round trip (a parameterized query can't share a call with BEGIN).
+    // RLS itself costs ~nothing; the round trips around it are what a request pays: this cuts a
+    // primary-key lookup from 4 round trips to 3, 19% faster on a fast network (docs/performance.md).
+    // Inlining is safe ONLY because UUID_RE above lets nothing but hex digits and dashes through.
+    // Never inline a value that hasn't passed a check this strict.
+    await client.query(`BEGIN; SELECT set_config('app.tenant_id', '${tenantId}', true)`);
     const result = await fn(client);
     await client.query('COMMIT');
     return result;
@@ -21,7 +33,8 @@ export async function withTenant<T>(pool: pg.Pool, tenantId: string, fn: (client
     await client.query('ROLLBACK').catch(() => {});
     throw e;
   } finally {
-    client.release();
+    client.off('error', onLost);
+    client.release(lost);
   }
 }
 
@@ -87,7 +100,21 @@ export async function hybridSearch(client: pg.PoolClient, p: HybridSearchParams)
      JOIN chunks c USING (id)
      ORDER BY rrf_score DESC
      LIMIT $5`,
-    [`[${p.embedding.join(',')}]`, p.query, p.candidates ?? 50, p.rrfK ?? 60, p.limit ?? 10],
+    [vectorParam(p.embedding), p.query, p.candidates ?? 50, p.rrfK ?? 60, p.limit ?? 10],
   );
   return rows;
+}
+
+/**
+ * Embedding as a binary parameter in pgvector's wire format (int16 dims, int16 unused, float32
+ * big-endian values). node-postgres sends Buffers in binary, so 1536 dims travel as 6 KB instead of
+ * ~32 KB of text and the server skips float parsing (a cheap vector lookup got about 3× faster from
+ * this alone, docs/performance.md).
+ */
+function vectorParam(v: number[]): Buffer {
+  const buf = Buffer.allocUnsafe(4 + 4 * v.length);
+  buf.writeInt16BE(v.length, 0);
+  buf.writeInt16BE(0, 2);
+  for (let i = 0; i < v.length; i++) buf.writeFloatBE(v[i], 4 + 4 * i);
+  return buf;
 }

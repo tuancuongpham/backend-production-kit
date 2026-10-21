@@ -2,9 +2,39 @@
 import type pg from 'pg';
 import type { BudgetStore, CacheStore, CachedResponse, UsageRecord } from './gateway.ts';
 
-const vec = (v: number[]) => `[${v.join(',')}]`;
+/**
+ * Embedding as a binary query parameter. node-postgres sends Buffers in binary format and pgvector reads
+ * them with vector_recv (int16 dims, int16 unused, float32 big-endian values): 6 KB for 1536 dims instead
+ * of ~32 KB of text, no float parsing on the server, and the same float32 values pgvector stores anyway.
+ * Measured: lookups and inserts about 3× faster (docs/performance.md). The parameter must be typed as
+ * vector, e.g. `$2::vector` or a vector column in VALUES.
+ */
+export function vectorParam(v: number[]): Buffer {
+  const buf = Buffer.allocUnsafe(4 + 4 * v.length);
+  buf.writeInt16BE(v.length, 0);
+  buf.writeInt16BE(0, 2);
+  for (let i = 0; i < v.length; i++) buf.writeFloatBE(v[i], 4 + 4 * i);
+  return buf;
+}
 
-export function pgCache(pool: pg.Pool): CacheStore {
+export interface PgCacheOptions {
+  /**
+   * How findSimilar searches one scope (tenant + model route + system prompt).
+   * - 'exact' (default): distance to every live entry of the scope, found through the (scope, expires_at)
+   *   index. Always returns the true nearest entry; cost grows with entries per scope (measured p50:
+   *   0.3 ms at 120 entries, 1.5 ms at 1,000, 9 ms at 5,000).
+   * - 'ann': HNSW index + pgvector >= 0.8 iterative scan, for scopes past a few thousand entries (2.3 ms
+   *   at 5,000). Needs the HNSW index (commented out in semantic-cache.sql), which makes every save ~7× slower.
+   * A plain HNSW query with `WHERE scope = …` is the trap in between: the index returns its ef_search
+   * (40) nearest rows across *all* scopes and the filter runs afterwards. Popular questions cached by
+   * many tenants fill those 40 slots, and this tenant's own entry is never seen. Numbers in
+   * docs/performance.md.
+   */
+  semanticSearch?: 'exact' | 'ann';
+}
+
+export function pgCache(pool: pg.Pool, opts: PgCacheOptions = {}): CacheStore {
+  const strategy = opts.semanticSearch ?? 'exact';
   return {
     async getExact(key) {
       const { rows } = await pool.query(`SELECT value FROM llm_exact_cache WHERE key = $1 AND expires_at > now()`, [key]);
@@ -18,36 +48,81 @@ export function pgCache(pool: pg.Pool): CacheStore {
       );
     },
     async findSimilar(scope, embedding, minSimilarity) {
-      // Nearest neighbour within the scope; similarity threshold applied on the result.
-      const { rows } = await pool.query(
-        `SELECT value, 1 - (embedding <=> $2::vector) AS similarity
-         FROM llm_semantic_cache
-         WHERE scope = $1 AND expires_at > now()
-         ORDER BY embedding <=> $2::vector
-         LIMIT 1`,
-        [scope, vec(embedding)],
-      );
-      const r = rows[0];
+      const probe = vectorParam(embedding);
+      let r: { value: unknown; similarity: number } | undefined;
+      if (strategy === 'exact') {
+        // ORDER BY the computed similarity (not the bare `<=>` operator) so the planner can't pick the
+        // HNSW index and post-filter; it scans this scope's live rows through (scope, expires_at).
+        const { rows } = await pool.query(
+          `SELECT value, 1 - (embedding <=> $2::vector) AS similarity
+           FROM llm_semantic_cache
+           WHERE scope = $1 AND expires_at > now()
+           ORDER BY similarity DESC
+           LIMIT 1`,
+          [scope, probe],
+        );
+        r = rows[0];
+      } else {
+        const client = await pool.connect();
+        // pg emits 'error' on a checked-out client whose connection dies between queries (failover);
+        // unheard, that crashes the process instead of failing this lookup.
+        let lost: Error | undefined;
+        const onLost = (err: Error) => {
+          lost = err;
+        };
+        client.on('error', onLost);
+        try {
+          await client.query('BEGIN');
+          // Keep walking the HNSW graph until a row of this scope turns up (pgvector >= 0.8).
+          await client.query(
+            `SELECT '[0]'::vector;
+             SELECT set_config('hnsw.iterative_scan', 'relaxed_order', true)
+             WHERE EXISTS (SELECT 1 FROM pg_settings WHERE name = 'hnsw.iterative_scan')`,
+          );
+          const { rows } = await client.query(
+            `SELECT value, 1 - (embedding <=> $2::vector) AS similarity
+             FROM llm_semantic_cache
+             WHERE scope = $1 AND expires_at > now()
+             ORDER BY embedding <=> $2::vector
+             LIMIT 1`,
+            [scope, probe],
+          );
+          await client.query('COMMIT');
+          r = rows[0];
+        } catch (e) {
+          await client.query('ROLLBACK').catch(() => {});
+          throw e;
+        } finally {
+          client.off('error', onLost);
+          client.release(lost);
+        }
+      }
       return r && r.similarity >= minSimilarity ? { value: r.value as CachedResponse, similarity: Number(r.similarity) } : null;
     },
     async saveSimilar(scope, embedding, value, ttlSec) {
       await pool.query(
         `INSERT INTO llm_semantic_cache (scope, embedding, value, expires_at)
          VALUES ($1, $2::vector, $3, now() + make_interval(secs => $4))`,
-        [scope, vec(embedding), JSON.stringify(value), ttlSec],
+        [scope, vectorParam(embedding), JSON.stringify(value), ttlSec],
       );
     },
   };
 }
 
-/** Reserve-then-settle on llm_budget: the conditional UPDATE is atomic across app instances. */
+/** Reserve-then-settle on llm_budget: the conditional upsert is atomic across app instances. */
 export function pgBudget(pool: pg.Pool): BudgetStore {
   return {
     async reserve(tenantId, period, usd, limitUsd) {
-      await pool.query(`INSERT INTO llm_budget (tenant_id, period) VALUES ($1, $2) ON CONFLICT DO NOTHING`, [tenantId, period]);
+      // One statement (this runs before every paid call): creates the period row on first use and reserves
+      // only while spent + reserved stays within the limit. ON CONFLICT takes the row lock, so concurrent
+      // reservations queue on it and never overshoot. About 20% lower latency and a third more throughput
+      // than an INSERT … DO NOTHING followed by a conditional UPDATE (docs/performance.md).
       const res = await pool.query(
-        `UPDATE llm_budget SET reserved_usd = reserved_usd + $3
-         WHERE tenant_id = $1 AND period = $2 AND spent_usd + reserved_usd + $3 <= $4`,
+        `INSERT INTO llm_budget AS b (tenant_id, period, reserved_usd)
+         SELECT $1, $2, $3::numeric WHERE $3::numeric <= $4::numeric
+         ON CONFLICT (tenant_id, period) DO UPDATE SET reserved_usd = b.reserved_usd + EXCLUDED.reserved_usd
+         WHERE b.spent_usd + b.reserved_usd + EXCLUDED.reserved_usd <= $4::numeric
+         RETURNING 1`,
         [tenantId, period, usd, limitUsd],
       );
       return res.rowCount === 1;
@@ -60,6 +135,23 @@ export function pgBudget(pool: pg.Pool): BudgetStore {
         [tenantId, period, reservedUsd, actualUsd],
       );
     },
+  };
+}
+
+/** Delete expired cache rows in batches. Run it on a schedule: nothing reads them again, and without
+ *  this both cache tables grow forever. */
+export async function pruneLlmCache(pool: pg.Pool, batchSize = 5000) {
+  const prune = async (sql: string) => {
+    let total = 0;
+    for (;;) {
+      const n = (await pool.query(sql, [batchSize])).rowCount ?? 0;
+      total += n;
+      if (n < batchSize) return total;
+    }
+  };
+  return {
+    exact: await prune(`DELETE FROM llm_exact_cache WHERE key IN (SELECT key FROM llm_exact_cache WHERE expires_at <= now() LIMIT $1)`),
+    semantic: await prune(`DELETE FROM llm_semantic_cache WHERE id IN (SELECT id FROM llm_semantic_cache WHERE expires_at <= now() LIMIT $1)`),
   };
 }
 

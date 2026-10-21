@@ -1,0 +1,32 @@
+{
+  "name": "outbox-relay",
+  "date": "2026-10-21T20:02:23.333Z",
+  "node": "v24.22.1",
+  "messages": 5000,
+  "rows": [
+    {
+      "variant": "A. one UPDATE per message (v0.2.0)",
+      "published": 5000,
+      "ms total": 1559,
+      "messages/s": 3207
+    },
+    {
+      "variant": "B. one UPDATE per batch",
+      "published": 5000,
+      "ms total": 173,
+      "messages/s": 28955
+    },
+    {
+      "variant": "B. one UPDATE per batch, batch 500",
+      "published": 5000,
+      "ms total": 64,
+      "messages/s": 78022
+    },
+    {
+      "variant": "C. shipped createRelay(), batch 100",
+      "published": 5000,
+      "ms total": 188,
+      "messages/s": 26609
+    }
+  ]
+}

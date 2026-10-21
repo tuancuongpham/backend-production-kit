@@ -55,6 +55,15 @@ export function openSse(req: http.IncomingMessage, res: http.ServerResponse, opt
     ac.abort(new Error('sse closed')); // cancels upstream LLM calls / subscriptions
     if (!res.writableEnded) res.end();
   }
+  /** Drop the connection now (no graceful end): for clients that stopped reading. */
+  function abort() {
+    if (!closed) {
+      closed = true;
+      clearInterval(heartbeat);
+      ac.abort(new Error('sse aborted'));
+    }
+    res.destroy();
+  }
   req.on('close', close);
   res.on('close', close);
   res.on('error', close);
@@ -90,6 +99,7 @@ export function openSse(req: http.IncomingMessage, res: http.ServerResponse, opt
     send,
     trySend,
     close,
+    abort,
     signal: ac.signal,
     lastEventId: typeof req.headers['last-event-id'] === 'string' ? req.headers['last-event-id'] : undefined,
     get closed() {
@@ -152,13 +162,32 @@ export function createReplayBuffer<T>(capacity = 1000) {
   };
 }
 
+export interface FeedOptions {
+  /**
+   * Events allowed to wait for one client (default 1000, the replay buffer's default capacity). A client
+   * further behind than that can't be replayed anyway, so it is dropped: EventSource reconnects with
+   * Last-Event-ID and gets the replay — or a 'reset' to reload state — instead of this process holding
+   * its backlog in memory until TCP notices a dead peer (which can take hours).
+   */
+  maxQueue?: number;
+  onOverflow?: () => void; // metric / log hook
+}
+
 /** Replay what the client missed, then follow live events until it disconnects. */
-export async function serveFeed<T>(sse: SseStream, feed: ReturnType<typeof createReplayBuffer<T>>) {
+export async function serveFeed<T>(sse: SseStream, feed: ReturnType<typeof createReplayBuffer<T>>, opts: FeedOptions = {}) {
+  const maxQueue = opts.maxQueue ?? 1000;
   // Subscribe first, replay second, dedup by id: nothing published during replay is lost.
   const queue: Array<{ id: number; event?: string; data: T }> = [];
   let wake: (() => void) | null = null;
   const unsubscribe = feed.subscribe((e) => {
+    if (sse.closed) return;
     queue.push(e);
+    if (queue.length > maxQueue) {
+      queue.length = 0;
+      opts.onOverflow?.();
+      sse.abort();
+      return;
+    }
     wake?.();
   });
   sse.signal.addEventListener('abort', () => wake?.());

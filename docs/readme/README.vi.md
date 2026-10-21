@@ -64,8 +64,35 @@ mẫu (nhiều cái là sự cố production kinh điển), nay đã sửa và c
 | Bucket dự phòng của rate limiter khi có nhiều key mới | **client bận nhất được cấp bucket đầy** đúng lúc sự cố | loại bỏ theo LRU thật |
 | `SET LOCAL hnsw.iterative_scan` trên pgvector 0.5–0.7 | **thỉnh thoảng hỏng transaction** trên kết nối dùng lại | chỉ đặt khi được hỗ trợ |
 | Worker webhook xử lý từng event một | 200 event, handler 5 ms: tồn đọng **3,2 giây** | **0,45 giây** với concurrency có giới hạn (nhanh hơn 7 lần) |
+| Semantic cache: index HNSW kèm điều kiện lọc tenant | câu trả lời đã cache của chính tenant **bị trượt ở các câu hỏi phổ biến** (chỉ tìm thấy 4/20), mỗi lần trượt là một lần gọi model mất tiền | tìm chính xác trong phạm vi tenant: 20/20, 0,45 ms |
+| Lệnh claim của worker webhook khi tồn đọng nhiều | mỗi lần claim phải sắp xếp toàn bộ hàng đợi: **56 ms mỗi lần claim khi có 200.000 event đến hạn**, chậm nhất đúng lúc cần nhanh nhất | 0,6 ms dù tồn đọng bao nhiêu |
+| Relay outbox gặp lệnh gọi broker bị treo | **toàn bộ việc phát event dừng lại mà không báo lỗi**, khóa relay bị giữ mãi | có timeout cho publish; lần chạy sau tiếp tục bình thường |
+| Upload vượt giới hạn | client nhận **kết nối bị reset thay vì 413** và upload lại từ đầu | trả về đúng 413; server chỉ đọc dưới 8 MB của file 32 MB |
+| Feed SSE gặp tab trình duyệt bị treo | **bộ nhớ tăng không giới hạn**: 40 MB bị đệm cho một client trong test | ngắt client khi chậm quá 1.000 event, client kết nối lại và được phát lại |
+| Rate limiter cấu hình `refillPerSec: 0` | mọi lần kiểm tra đều lỗi, limiter **âm thầm chạy ở chế độ dự phòng** | từ chối ngay khi khởi động |
+| Prompt RAG 240 KB trong trace | span quá lớn bị loại bỏ: **chính những request lớn nhất không truy vết được** | giới hạn 32 KiB mỗi thuộc tính |
+| Postgres ngắt kết nối giữa transaction (failover, `idle_in_transaction_session_timeout`) | **cả process Node bị sập**, kéo theo mọi request đang xử lý | chỉ request đó lỗi; có test ở mọi skill giữ kết nối |
 
-Benchmark: `node bench/run.ts` ([số liệu trước/sau](../performance.md)).
+## Nhanh hơn, và được đo so với các phương án khác
+
+Với mỗi đường xử lý nóng, các phương án thực tế được benchmark song song trên Postgres và Redis thật, và code mẫu
+dùng phương án thắng ([toàn bộ bảng số, query plan và đánh đổi](../performance.md)):
+
+| Đường xử lý | So sánh | Phương án dùng | Mức cải thiện đo được |
+|---|---|---|---|
+| Gửi embedding vào Postgres | dạng text (17 hoặc 9 chữ số) và dạng binary | binary `vectorParam` | lookup và insert nhanh hơn ~3 lần, ít hơn 5 lần số byte |
+| Lưu vector cho tìm kiếm chính xác | lưu ngoài dòng (mặc định), lưu trong dòng, `halfvec` | trong dòng (`STORAGE MAIN`) | nhanh hơn 2–3 lần, kết quả giống hệt |
+| Tra cứu semantic cache | HNSW + lọc, HNSW iterative scan, tìm chính xác theo tenant | tìm chính xác; ANN tùy chọn cho tenant lớn | phương án duy nhất vừa đúng vừa nhanh nhất với tenant thông thường |
+| Worker webhook | một vòng lặp chia lane song song, nhiều vòng lặp độc lập | `run({ loops })` | nhanh hơn 1,8 lần khi có handler chậm |
+| Relay outbox | `UPDATE` từng message, `UPDATE` theo lô | theo lô | thông lượng gấp 8 lần |
+| Giữ chỗ ngân sách LLM | hai câu lệnh, một câu upsert | upsert | độ trễ giảm 20%, thông lượng tăng 37% |
+| Claim idempotency key | kiểm tra rồi insert, insert rồi chờ, try-lock + 409 | try-lock + 409 | 20 request trùng: handler chạy 1 lần thay vì 20; giữ kết nối pool 0,13 giây thay vì 4 giây |
+| Transaction theo tenant (RLS) | 4 round trip, 3 round trip | 3 | mỗi request nhanh hơn 19%; bản thân RLS gần như không tốn gì |
+| Client của rate limiter | mặc định của ioredis, auto-pipelining | mặc định (giữ nguyên) | auto-pipelining chậm hơn 11% |
+| Che PII | có hint, không hint, một regex gộp | có hint (giữ nguyên) | nhanh hơn 1,3–4,7 lần so với các phương án khác |
+
+Benchmark: `npm run bench:docker -- bench/compare/<tên>.ts` và `node bench/run.ts`. Các skill đang cân nhắc làm
+tiếp: [roadmap](../roadmap.md).
 
 ## Bắt đầu nhanh
 
@@ -95,6 +122,7 @@ theo khách"); skill phù hợp sẽ tự được nạp.
 | [`multitenant-postgres`](../../skills/multitenant-postgres/SKILL.md) | tách dữ liệu nhiều khách trong một Postgres, kể cả RAG / vector search |
 | [`webhook-ingestion`](../../skills/webhook-ingestion/SKILL.md) | nhận webhook thanh toán hoặc SaaS (Stripe, VNPay, MoMo, GitHub…) |
 | [`outbox-pattern`](../../skills/outbox-pattern/SKILL.md) | phát event hoặc chạy tác vụ (AI) bất đồng bộ sau khi ghi DB |
+| [`idempotency-keys`](../../skills/idempotency-keys/SKILL.md) | nhận POST bị gửi lại hoặc tool call của agent bị retry mà không trùng đơn, trùng tiền, trùng email |
 | [`rate-limiting`](../../skills/rate-limiting/SKILL.md) | giới hạn request API, đăng nhập, endpoint LLM theo tenant hoặc user |
 | [`service-hardening`](../../skills/service-hardening/SKILL.md) | đưa API lên Docker/Kubernetes mà không bị 502 hay treo khi deploy |
 | [`llm-gateway`](../../skills/llm-gateway/SKILL.md) | kiểm soát chi phí LLM, thêm cache, chuyển model dự phòng khi provider lỗi |
@@ -108,7 +136,7 @@ theo khách"); skill phù hợp sẽ tự được nạp.
 npm install
 npm run verify:up      # Postgres 17 + pgvector và Redis 7 trong Docker
 npm test               # code mẫu chạy trên hạ tầng thật
-node bench/run.ts      # số liệu hiệu năng
+npm run bench:docker -- bench/compare/webhook-claim.ts   # một bài so sánh phương án
 npm run verify:down
 ```
 

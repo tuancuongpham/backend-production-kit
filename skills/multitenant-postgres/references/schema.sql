@@ -18,6 +18,8 @@ CREATE OR REPLACE FUNCTION kit_unaccent(text) RETURNS text
   AS $$ SELECT public.unaccent('public.unaccent'::regdictionary, $1) $$;
 
 -- NULLIF: after a SET LOCAL ends, the GUC reverts to '' (not NULL) on that connection.
+-- STABLE lets every policy use the tenant_id indexes. Without it (plpgsql's default is VOLATILE) each
+-- RLS query becomes a full table scan: 380× slower on 200,000 rows (docs/performance.md).
 CREATE OR REPLACE FUNCTION current_tenant_id() RETURNS uuid
   LANGUAGE sql STABLE PARALLEL SAFE
   AS $$ SELECT NULLIF(current_setting('app.tenant_id', true), '')::uuid $$;

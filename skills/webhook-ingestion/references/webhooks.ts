@@ -1,5 +1,6 @@
 // Webhook ingestion: verify → store once → process async with retries → dead-letter → replay → reconcile.
 import { createHmac, timingSafeEqual } from 'node:crypto';
+import { setTimeout as sleep } from 'node:timers/promises';
 import type pg from 'pg';
 
 // ---------- 1. Signature verification (on the RAW body, before JSON.parse) ----------
@@ -94,8 +95,21 @@ export interface WorkerOptions {
    * Raise it only when handlers are safe to run concurrently for *different* events of the same
    * object — e.g. they lock the order row (SELECT … FOR UPDATE) or apply state changes conditionally.
    * Keep it ≤ the pool size minus what the claim query and the rest of the app need.
+   * A batch finishes only when its slowest row does; with handlers of uneven latency prefer
+   * run({ loops }) (the same safety conditions apply).
    */
   concurrency?: number;
+}
+
+export interface RunOptions {
+  /** Independent claim → process loops (default 4). Each holds a pool connection while a handler runs. */
+  loops?: number;
+  /** Pause after an empty claim or an error, ms (default 1000). */
+  idleMs?: number;
+  /** Abort to stop. run() resolves once every loop has finished the rows it already claimed. */
+  signal: AbortSignal;
+  /** Claim failures (database unreachable…). The loop backs off for idleMs and keeps going. */
+  onError?: (err: unknown) => void;
 }
 
 /** Exponential backoff with "equal jitter": never ~0, never synchronized across rows. */
@@ -110,16 +124,28 @@ export function createInboxWorker(o: WorkerOptions) {
   const max = o.maxDelayMs ?? 3_600_000;
 
   async function claim(): Promise<InboxRow[]> {
+    // Two branches, each walking its own partial index in order and stopping after LIMIT rows: rows stuck
+    // in 'processing' (a worker died) first, then due 'pending' rows. A single `pending OR stuck` filter
+    // can't use either index's order, so Postgres fetches and sorts the whole due backlog on every claim:
+    // the claim slows down exactly when a backlog builds up (docs/performance.md).
     const { rows } = await o.pool.query<InboxRow>(
       `UPDATE webhook_inbox
          SET status = 'processing', locked_at = now(), attempts = attempts + 1
        WHERE id IN (
-         SELECT id FROM webhook_inbox
-         WHERE (status = 'pending' AND next_attempt_at <= now())
-            OR (status = 'processing' AND locked_at < now() - make_interval(secs => $2))
-         ORDER BY next_attempt_at
-         LIMIT $1
-         FOR UPDATE SKIP LOCKED)
+         SELECT id FROM (
+           SELECT id FROM webhook_inbox
+           WHERE status = 'processing' AND locked_at < now() - make_interval(secs => $2)
+           ORDER BY locked_at
+           LIMIT $1
+           FOR UPDATE SKIP LOCKED) stuck
+         UNION ALL
+         SELECT id FROM (
+           SELECT id FROM webhook_inbox
+           WHERE status = 'pending' AND next_attempt_at <= now()
+           ORDER BY next_attempt_at
+           LIMIT $1
+           FOR UPDATE SKIP LOCKED) due
+         LIMIT $1)
        RETURNING id, provider, event_id, event_type, payload, attempts, source`,
       [o.batchSize ?? 10, o.stuckAfterSec ?? 300],
     );
@@ -129,6 +155,14 @@ export function createInboxWorker(o: WorkerOptions) {
   async function processRow(row: InboxRow): Promise<'done' | 'retry' | 'dead' | 'ignored'> {
     const handler = o.handlers[`${row.provider}:${row.event_type}`] ?? o.handlers[`${row.provider}:*`];
     const client = await o.pool.connect();
+    // pg emits 'error' on a checked-out client whose connection dies between queries (a slow handler meets
+    // idle_in_transaction_session_timeout, or a failover). Unheard, that crashes the worker process; heard,
+    // the handler's next query fails and the row goes back to 'pending' with a backoff.
+    let lost: Error | undefined;
+    const onLost = (err: Error) => {
+      lost = err;
+    };
+    client.on('error', onLost);
     try {
       if (!handler) {
         // Unknown event types are acknowledged, not retried forever. Keep the row for audit.
@@ -157,11 +191,12 @@ export function createInboxWorker(o: WorkerOptions) {
       if (dead) o.onDead?.(row, err);
       return dead ? 'dead' : 'retry';
     } finally {
-      client.release();
+      client.off('error', onLost);
+      client.release(lost);
     }
   }
 
-  /** One polling tick. Run it on an interval (and/or on LISTEN/NOTIFY) from a worker process. */
+  /** One claim → process tick. run() loops it; call it directly from tests or your own scheduler. */
   async function processOnce() {
     const rows = await claim();
     const results: Array<Awaited<ReturnType<typeof processRow>>> = new Array(rows.length);
@@ -177,7 +212,30 @@ export function createInboxWorker(o: WorkerOptions) {
     return results;
   }
 
-  return { processOnce };
+  /**
+   * The worker process: `loops` independent claim → process loops. Better than one loop with
+   * `concurrency` lanes when handler latency varies: a batch only ends when its slowest row does, so one
+   * slow provider call idles every other lane, while independent loops keep claiming (heavy-tailed
+   * handlers drained 1.8× faster, docs/performance.md). Keep `batchSize` small (2–5) here: rows a loop
+   * has claimed wait behind its current one. Await the returned promise in your shutdown hook after
+   * aborting, or a deploy strands claimed rows in 'processing' until `stuckAfterSec`.
+   */
+  async function run(r: RunOptions): Promise<void> {
+    const loop = async () => {
+      while (!r.signal.aborted) {
+        let worked = false;
+        try {
+          worked = (await processOnce()).length > 0;
+        } catch (err) {
+          r.onError?.(err);
+        }
+        if (!worked) await sleep(r.idleMs ?? 1000, undefined, { signal: r.signal }).catch(() => {}); // abort ends the nap
+      }
+    };
+    await Promise.all(Array.from({ length: Math.max(1, r.loops ?? 4) }, loop));
+  }
+
+  return { processOnce, run };
 }
 
 // ---------- 4. Replay: put dead (or any selected) events back in the queue ----------
@@ -193,6 +251,30 @@ export async function replay(pool: pg.Pool, filter: { ids?: string[]; provider?:
     [filter.status ?? 'dead', filter.ids ?? null, filter.provider ?? null, filter.eventType ?? null],
   );
   return res.rowCount ?? 0;
+}
+
+/**
+ * Retention: delete processed rows older than the window, in batches (short locks, no table-long
+ * DELETE). Dead letters are never deleted — they need a human.
+ * The window must be longer than the provider's longest retry period (Stripe retries for up to 3 days):
+ * once a row is gone, the dedup key is gone too, and a late redelivery of that event is processed again.
+ */
+export async function pruneInbox(pool: pg.Pool, opts: { olderThanDays?: number; batchSize?: number } = {}) {
+  const olderThanDays = opts.olderThanDays ?? 30;
+  const batchSize = opts.batchSize ?? 5000;
+  let total = 0;
+  for (;;) {
+    const res = await pool.query(
+      `DELETE FROM webhook_inbox WHERE id IN (
+         SELECT id FROM webhook_inbox
+         WHERE status = 'done' AND processed_at < now() - make_interval(days => $1)
+         LIMIT $2)`,
+      [olderThanDays, batchSize],
+    );
+    const n = res.rowCount ?? 0;
+    total += n;
+    if (n < batchSize) return total;
+  }
 }
 
 // ---------- 5. Reconcile: pull what the provider says happened, ingest anything we missed ----------

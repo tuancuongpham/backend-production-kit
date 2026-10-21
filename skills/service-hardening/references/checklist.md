@@ -16,6 +16,12 @@ Tick each item, or write down why it doesn't apply. Items marked 🧪 should hav
 - [ ] 🧪 `/livez` has no dependency checks; `/readyz` checks deps with timeouts
 - [ ] Startup validates config and fails fast
 - [ ] DB pool size × instances ≤ DB `max_connections` (minus headroom for migrations and admin)
+- [ ] 🧪 A Postgres restart or failover doesn't crash the process. node-postgres emits `error` when the server ends a
+  connection: `pool.on('error', log)` covers idle pooled clients, and every checked-out client needs a listener
+  for as long as it is held (the kit's reference functions add one). With neither, one `pg_terminate_backend` or
+  `idle_in_transaction_session_timeout` exits the process with every in-flight request
+  ([`connection-loss.test.ts`](../../../verify/tests/connection-loss.test.ts))
+- [ ] Retried writes are idempotent: `Idempotency-Key` on create/charge/send endpoints (see `idempotency-keys`)
 
 ## Observability
 - [ ] Request id generated or propagated and present in every log line

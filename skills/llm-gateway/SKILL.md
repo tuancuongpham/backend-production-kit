@@ -35,8 +35,13 @@ LLM APIs are the most expensive and least reliable dependency most apps have. Th
    - **Accounting never fails a request**: `onUsage` errors, sync or async, are caught and passed to `onUsageError`.
 2. **Stores**: [references/semantic-cache.sql](references/semantic-cache.sql) + [references/pg-stores.ts](references/pg-stores.ts):
    - Postgres/pgvector exact and semantic caches (Redis is a fine alternative for the exact cache);
-   - the `llm_budget` counters (one conditional `UPDATE` per reservation, atomic across instances);
-   - the `llm_usage` ledger for reports. Reconcile `llm_budget` against the `llm_monthly_spend` view daily, since they drift if a usage write is lost.
+   - the semantic lookup searches **only the caller's scope, exactly**, by default (`pgCache(pool)`). Measured p50 is 0.3 ms at 120 entries per scope, 1.5 ms at 1,000 and 9 ms at 5,000;
+   - past a few thousand entries per scope, switch to `pgCache(pool, { semanticSearch: 'ann' })` with the HNSW index, on pgvector ≥ 0.8 (iterative scans): 2.3 ms at 5,000. The index makes every cache save ~7× slower, so don't create it before you need it;
+   - **never a plain HNSW index plus `WHERE scope = …`**. The index hands back its 40 nearest rows across *all* tenants and the filter runs afterwards. A question that many tenants cached crowds out this tenant's own copy: 4 hits out of 20 in the benchmark, each miss a full-price model call;
+   - embeddings travel as binary parameters (`vectorParam`): 6 KB instead of ~32 KB of text, and lookups and saves about 3× faster. The schema also keeps vectors inside the row (`SET STORAGE MAIN`), which makes exact search 2–3× faster;
+   - the `llm_budget` counters: one conditional upsert per reservation, atomic across instances;
+   - the `llm_usage` ledger for reports. Reconcile `llm_budget` against the `llm_monthly_spend` view daily, since they drift if a usage write is lost;
+   - `pruneLlmCache(pool)` on a schedule. Expired rows are never read again, and without it both cache tables grow forever.
 3. **Providers**: wrap each SDK call in the `Provider` interface and map its errors to `ProviderError(status)`. With an upstream gateway (LiteLLM / Vercel AI Gateway), the "provider" is that gateway, and you can lean on its fallback instead.
 4. **Streaming**: stream tokens to the client (see `sse-streaming`). Write the cache entry and usage row when the stream completes, and replay cached answers as a stream so the UX is identical.
 5. **FinOps dashboard and alerts** (project #14): the starter queries at the bottom of the SQL give cost by tenant/feature/model, cache hit rate, and a "today > 3× trailing average" anomaly check. Run the anomaly query on a schedule and page someone; that's how you catch a retry loop before the invoice does. Put `feature` on every call, since "which feature costs what" is the question you'll be asked.
@@ -63,6 +68,7 @@ LLM APIs are the most expensive and least reliable dependency most apps have. Th
   - cache hits are still served when out of budget.
 - **Accounting**: a usage sink that throws or rejects doesn't fail the request.
 - **Postgres stores**: TTL expiry, similarity threshold, scope isolation.
+- **Many tenants, same question** ([latent-bugs-round2.test.ts](../../verify/tests/latent-bugs-round2.test.ts)): 100 tenants cache a popular question, and this tenant's own entry is still found with an HNSW index present. `pruneLlmCache` removes only expired rows.
 
 When writing your own tests: make the concurrency test real (requests in flight together, e.g. a provider that sleeps), and inject a failing usage sink. Code inspection alone doesn't prove either property.
 
@@ -81,3 +87,6 @@ ADR: build vs buy, fallback chain and its quality trade-off, semantic cache thre
 - Turning the semantic cache on in `serve` mode on day one, with a threshold nobody measured.
 - A model missing from the price table. Its estimate and cost are $0, so the budget silently never limits anything. The reference gateway refuses to start with budgets on and an unpriced model.
 - Computing the budget period twice (once at reserve, once at settle). A call that crosses midnight at month end leaves its reservation stuck in the old month forever. Capture the period once per call.
+- An HNSW index with a tenant filter on top (`ORDER BY embedding <=> $1 … WHERE scope = $2`). It looks like the textbook query and returns fast, but it misses the tenant's own entries exactly when a question is popular, so the cache fails where it would save the most.
+- Sending embeddings as `'[0.0123,…]'` text: 32 KB per 1536-dim vector, parsed on every query. Send a binary parameter.
+- Benchmarking a local Docker Postgres from the host on Docker Desktop: any message of 16 KB or more gets ~44 ms added by the port forwarder, so text-encoded vectors look 40 ms slow. Measure inside the Docker network (`npm run bench:docker`).

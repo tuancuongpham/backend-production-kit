@@ -70,10 +70,22 @@ export interface ContentOptions {
   captureContent?: boolean; // default true
   /** Apply PII redaction before content leaves the process (see pii-redaction skill). */
   redact?: (s: string) => string;
+  /**
+   * Cap per content attribute (default 32 KiB). RAG prompts reach hundreds of KB; spans that size can
+   * exceed exporter or backend request limits, and a rejected export drops the whole batch, other
+   * requests' spans included.
+   */
+  maxContentChars?: number;
 }
 
-function contentJson(messages: TraceMessage[], redact?: (s: string) => string) {
-  return JSON.stringify(messages.map((m) => ({ role: m.role, content: redact ? redact(m.content) : m.content })));
+const DEFAULT_MAX_CONTENT = 32 * 1024;
+
+function bounded(s: string, max: number) {
+  return s.length > max ? `${s.slice(0, max)}…[TRUNCATED ${s.length - max} chars]` : s;
+}
+
+function contentJson(messages: TraceMessage[], redact: ((s: string) => string) | undefined, max: number) {
+  return bounded(JSON.stringify(messages.map((m) => ({ role: m.role, content: redact ? redact(m.content) : m.content }))), max);
 }
 
 /** Wrap one model call. Creates a CLIENT span as a child of whatever is active (HTTP request, job). */
@@ -84,6 +96,7 @@ export async function withLlmSpan<T extends LlmCallResult>(
   opts: ContentOptions = {},
 ): Promise<T> {
   const capture = opts.captureContent ?? true;
+  const max = opts.maxContentChars ?? DEFAULT_MAX_CONTENT;
   return tracer.startActiveSpan(`chat ${info.model}`, { kind: SpanKind.CLIENT }, async (span) => {
     span.setAttributes({
       [ATTR.operation]: 'chat',
@@ -100,7 +113,7 @@ export async function withLlmSpan<T extends LlmCallResult>(
       ...(info.promptVersion && { [ATTR.promptVersion]: info.promptVersion }),
     });
     if (capture) {
-      const input = contentJson(info.messages, opts.redact);
+      const input = contentJson(info.messages, opts.redact, max);
       span.setAttribute(ATTR.inputMessages, input);
       span.setAttribute(ATTR.lfInput, input);
     }
@@ -115,7 +128,7 @@ export async function withLlmSpan<T extends LlmCallResult>(
       if (result.costUsd !== undefined) span.setAttribute(ATTR.costUsd, result.costUsd);
       if (result.cache) span.setAttribute(ATTR.cache, result.cache);
       if (capture) {
-        const output = contentJson([{ role: 'assistant', content: result.content }], opts.redact);
+        const output = contentJson([{ role: 'assistant', content: result.content }], opts.redact, max);
         span.setAttribute(ATTR.outputMessages, output);
         span.setAttribute(ATTR.lfOutput, output);
       }
@@ -144,16 +157,17 @@ export async function withRetrievalSpan<T extends RetrievedDoc[]>(
   tracer: Tracer,
   query: string,
   fn: () => Promise<T>,
-  opts: { redact?: (s: string) => string } = {},
+  opts: { redact?: (s: string) => string; maxContentChars?: number } = {},
 ): Promise<T> {
+  const max = opts.maxContentChars ?? DEFAULT_MAX_CONTENT;
   return tracer.startActiveSpan('retrieve', async (span) => {
-    span.setAttribute(ATTR.retrievalQuery, opts.redact ? opts.redact(query) : query);
+    span.setAttribute(ATTR.retrievalQuery, bounded(opts.redact ? opts.redact(query) : query, max));
     try {
       const docs = await fn();
       span.setAttribute(ATTR.retrievalCount, docs.length);
       span.setAttribute(
         ATTR.retrievalDocs,
-        JSON.stringify(docs.map((d) => ({ id: d.id, documentId: d.documentId, version: d.version, score: d.score, rank: d.rank }))),
+        bounded(JSON.stringify(docs.map((d) => ({ id: d.id, documentId: d.documentId, version: d.version, score: d.score, rank: d.rank }))), max),
       );
       return docs;
     } catch (err) {

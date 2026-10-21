@@ -1,0 +1,58 @@
+{
+  "name": "idempotency",
+  "date": "2026-10-21T21:02:24.460Z",
+  "node": "v24.22.1",
+  "latency": [
+    {
+      "variant": "no idempotency (BEGIN, INSERT, COMMIT)",
+      "first request p50 ms": 1.648,
+      "replay p50 ms": "—"
+    },
+    {
+      "variant": "A. check, then insert",
+      "first request p50 ms": 2.134,
+      "replay p50 ms": 0.524
+    },
+    {
+      "variant": "B. insert first, duplicates wait",
+      "first request p50 ms": 2.243,
+      "replay p50 ms": 0.71
+    },
+    {
+      "variant": "C0. first draft of C: claim + read in one statement",
+      "first request p50 ms": 2.549,
+      "replay p50 ms": 0.672
+    },
+    {
+      "variant": "C. shipped runIdempotent (409 at once)",
+      "first request p50 ms": 2.2,
+      "replay p50 ms": 0.84
+    }
+  ],
+  "burst": [
+    {
+      "variant": "A. check, then insert",
+      "handler runs": 20,
+      "orders committed": 1,
+      "answers: first / replay / 409 / error": "1 / 0 / 0 / 19",
+      "connection time held by the 19 duplicates, ms": 4075,
+      "slowest duplicate answer, ms": 215
+    },
+    {
+      "variant": "B. insert first, duplicates wait",
+      "handler runs": 1,
+      "orders committed": 1,
+      "answers: first / replay / 409 / error": "1 / 19 / 0 / 0",
+      "connection time held by the 19 duplicates, ms": 4132,
+      "slowest duplicate answer, ms": 218
+    },
+    {
+      "variant": "C. shipped runIdempotent (409 at once)",
+      "handler runs": 1,
+      "orders committed": 1,
+      "answers: first / replay / 409 / error": "1 / 0 / 19 / 0",
+      "connection time held by the 19 duplicates, ms": 130,
+      "slowest duplicate answer, ms": 8
+    }
+  ]
+}

@@ -1,0 +1,31 @@
+{
+  "name": "budget",
+  "date": "2026-10-21T20:08:19.924Z",
+  "node": "v24.22.1",
+  "rows": [
+    {
+      "variant": "A. two statements (v0.2.0)",
+      "p50 ms": 1.407,
+      "p95 ms": 3.01,
+      "reservations/s (16 parallel)": 5402,
+      "granted of 200 ($50 limit)": 50,
+      "oversized first call refused": true
+    },
+    {
+      "variant": "B. one upsert",
+      "p50 ms": 1.18,
+      "p95 ms": 2.707,
+      "reservations/s (16 parallel)": 7074,
+      "granted of 200 ($50 limit)": 50,
+      "oversized first call refused": true
+    },
+    {
+      "variant": "C. shipped pgBudget()",
+      "p50 ms": 1.126,
+      "p95 ms": 2.729,
+      "reservations/s (16 parallel)": 7405,
+      "granted of 200 ($50 limit)": 50,
+      "oversized first call refused": true
+    }
+  ]
+}

@@ -1,0 +1,29 @@
+{
+  "name": "vector-params",
+  "date": "2026-10-21T20:15:55.925Z",
+  "node": "v24.22.1",
+  "dims": 1536,
+  "rows": [
+    {
+      "encoding": "A. text, 17 digits (v0.2.0)",
+      "bytes per vector": 32585,
+      "lookup p50 ms": 1.604,
+      "insert p50 ms": 0.95,
+      "max similarity diff vs A": "0.0e+0"
+    },
+    {
+      "encoding": "B. text, 9 digits",
+      "bytes per vector": 20983,
+      "lookup p50 ms": 1.428,
+      "insert p50 ms": 1.154,
+      "max similarity diff vs A": "5.4e-9"
+    },
+    {
+      "encoding": "C. binary (vector_recv)",
+      "bytes per vector": 6148,
+      "lookup p50 ms": 0.461,
+      "insert p50 ms": 0.292,
+      "max similarity diff vs A": "0.0e+0"
+    }
+  ]
+}

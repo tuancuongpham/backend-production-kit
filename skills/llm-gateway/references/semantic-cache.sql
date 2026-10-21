@@ -6,6 +6,7 @@ CREATE TABLE IF NOT EXISTS llm_exact_cache (
   value      jsonb NOT NULL,
   expires_at timestamptz NOT NULL
 );
+CREATE INDEX IF NOT EXISTS llm_exact_cache_expires_idx ON llm_exact_cache (expires_at); -- pruneLlmCache
 
 CREATE TABLE IF NOT EXISTS llm_semantic_cache (
   id         bigserial PRIMARY KEY,
@@ -15,8 +16,19 @@ CREATE TABLE IF NOT EXISTS llm_semantic_cache (
   created_at timestamptz NOT NULL DEFAULT now(),
   expires_at timestamptz NOT NULL
 );
-CREATE INDEX IF NOT EXISTS llm_semantic_cache_scope_idx ON llm_semantic_cache (scope, expires_at);
-CREATE INDEX IF NOT EXISTS llm_semantic_cache_vec_idx ON llm_semantic_cache USING hnsw (embedding vector_cosine_ops);
+-- pgvector stores vectors out of line (TOAST) by default, so exact search pays extra lookups for every row
+-- it reads. Kept in the row instead, exact search ran 2–3× faster with identical results (docs/performance.md).
+-- Fits up to ~2,000 dimensions; for 3072-dim models use halfvec(3072), which also halves the bytes read.
+-- Applies to rows written from now on, so an existing cache converts itself within one TTL.
+ALTER TABLE llm_semantic_cache ALTER COLUMN embedding SET STORAGE MAIN;
+CREATE INDEX IF NOT EXISTS llm_semantic_cache_scope_idx ON llm_semantic_cache (scope, expires_at);   -- exact search
+CREATE INDEX IF NOT EXISTS llm_semantic_cache_expires_idx ON llm_semantic_cache (expires_at);        -- pruneLlmCache
+-- HNSW only for pgCache(pool, { semanticSearch: 'ann' }): scopes past a few thousand live entries, on
+-- pgvector >= 0.8. Measured at 5,000 entries in one scope: 2.3 ms with HNSW + iterative scan vs 8.4 ms exact.
+-- With the default exact search the index is never used, yet it makes every cache write ~7× slower
+-- (9.2 ms instead of 1.2 ms), so don't create it "just in case". Building it on a full table in Docker
+-- may run in parallel and need more than the default 64 MB /dev/shm: raise --shm-size.
+-- CREATE INDEX IF NOT EXISTS llm_semantic_cache_vec_idx ON llm_semantic_cache USING hnsw (embedding vector_cosine_ops);
 
 -- One row per LLM call (including cache hits and failures): the input for FinOps dashboards.
 CREATE TABLE IF NOT EXISTS llm_usage (
@@ -40,7 +52,7 @@ CREATE TABLE IF NOT EXISTS llm_usage (
 CREATE INDEX IF NOT EXISTS llm_usage_tenant_at_idx ON llm_usage (tenant_id, at);
 
 -- Budget counters: the gateway reserves a pessimistic estimate here BEFORE calling the model
--- (single conditional UPDATE = atomic across app instances), then settles with the real cost.
+-- (one conditional upsert = atomic across app instances), then settles with the real cost.
 CREATE TABLE IF NOT EXISTS llm_budget (
   tenant_id    text NOT NULL,
   period       text NOT NULL,                -- 'YYYY-MM' (UTC)

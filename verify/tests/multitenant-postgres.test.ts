@@ -89,6 +89,23 @@ describe('multitenant-postgres', () => {
     c.release();
   });
 
+  it('rejects a malformed tenant id before any SQL runs (withTenant inlines the checked id)', async () => {
+    let called = false;
+    for (const bad of [`${A}'; DROP TABLE documents; --`, `${A}\n`, `' OR '1'='1`, `${A}'`, '']) {
+      await assert.rejects(
+        withTenant(pool, bad, async () => {
+          called = true;
+        }),
+        /invalid tenant id/,
+      );
+    }
+    assert.equal(called, false);
+    assert.equal((await admin.query(`SELECT to_regclass('documents') IS NOT NULL AS ok`)).rows[0].ok, true);
+    // Upper-case ids are valid UUIDs and still select the right tenant.
+    const n = await withTenant(pool, A.toUpperCase(), async (c) => (await c.query('SELECT count(*)::int n FROM chunks')).rows[0].n);
+    assert.equal(n, 3);
+  });
+
   it('cannot insert rows for another tenant (WITH CHECK)', async () => {
     await assert.rejects(
       withTenant(pool, A, (c) => c.query(`INSERT INTO documents (tenant_id, title) VALUES ('${B}', 'sneaky')`)),

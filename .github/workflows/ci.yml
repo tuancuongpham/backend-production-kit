@@ -18,8 +18,8 @@ jobs:
     # frontmatter rules enforced on skill upload, links, eval sets
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-node@v4
+      - uses: actions/checkout@v5
+      - uses: actions/setup-node@v5
         with:
           node-version: 24
       - name: Validate skills, links and eval sets
@@ -54,9 +54,9 @@ jobs:
       KIT_PG_URL: postgres://kit:kit@localhost:5432/kit
       KIT_REDIS_URL: redis://localhost:6379
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
 
-      - uses: actions/setup-node@v4
+      - uses: actions/setup-node@v5
         with:
           # the reference code is .ts run directly by Node's type stripping
           node-version: 24

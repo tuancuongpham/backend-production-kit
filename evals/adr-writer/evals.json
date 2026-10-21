@@ -1,0 +1,17 @@
+{
+  "skill_name": "adr-writer",
+  "evals": [
+    {
+      "id": 1,
+      "prompt": "We just decided to use Postgres RLS instead of schema-per-tenant. Write that up so the team knows why.",
+      "expected_output": "Gathers context/numbers, runs new-adr.mjs, fills options with real cons, decision with parameters, verification test names, revisit triggers.",
+      "files": []
+    },
+    {
+      "id": 2,
+      "prompt": "Viết giúp mình một bài blog kỹ thuật về hệ thống multi-tenant RAG mình vừa làm, có sơ đồ và số liệu, để đăng LinkedIn.",
+      "expected_output": "Uses the write-up template with Mermaid diagram, links ADRs and benchmark reports, only measured numbers (asks for them), \"what went wrong\" section, reminds to strip confidential details.",
+      "files": []
+    }
+  ]
+}

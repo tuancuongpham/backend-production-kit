@@ -1,0 +1,60 @@
+# OpenTelemetry Collector (contrib distribution): apps → collector → Langfuse (LLM spans) + general tracing backend.
+# Not executed by the kit's tests. Validate with `otelcol-contrib validate --config collector.yaml`.
+receivers:
+  otlp:
+    protocols:
+      http:
+        endpoint: 0.0.0.0:4318
+      grpc:
+        endpoint: 0.0.0.0:4317
+
+processors:
+  memory_limiter:
+    check_interval: 1s
+    limit_percentage: 80
+  batch: {}
+  # Second line of defence for PII: drop or hash sensitive attributes that slipped through app-side redaction.
+  attributes/scrub:
+    actions:
+      - key: http.request.header.authorization
+        action: delete
+      - key: enduser.email
+        action: hash
+  # Keep only GenAI spans (and their parents/children are still in the general backend) for Langfuse.
+  filter/llm_only:
+    error_mode: ignore
+    traces:
+      span:
+        - 'attributes["gen_ai.operation.name"] == nil and attributes["app.retrieval.query"] == nil'
+  # Tail sampling: keep all errors and all LLM traces, 10% of the rest.
+  tail_sampling:
+    decision_wait: 10s
+    policies:
+      - name: errors
+        type: status_code
+        status_code: { status_codes: [ERROR] }
+      - name: llm
+        type: string_attribute
+        string_attribute: { key: gen_ai.operation.name, values: [chat] }
+      - name: baseline
+        type: probabilistic
+        probabilistic: { sampling_percentage: 10 }
+
+exporters:
+  otlphttp/langfuse:
+    endpoint: ${env:LANGFUSE_HOST}/api/public/otel
+    headers:
+      Authorization: Basic ${env:LANGFUSE_AUTH} # base64("pk-lf-...:sk-lf-...")
+  otlphttp/tracing:
+    endpoint: ${env:TRACING_OTLP_ENDPOINT} # Tempo / Jaeger / APM vendor
+
+service:
+  pipelines:
+    traces/all:
+      receivers: [otlp]
+      processors: [memory_limiter, attributes/scrub, tail_sampling, batch]
+      exporters: [otlphttp/tracing]
+    traces/llm:
+      receivers: [otlp]
+      processors: [memory_limiter, attributes/scrub, filter/llm_only, batch]
+      exporters: [otlphttp/langfuse]

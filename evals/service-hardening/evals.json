@@ -1,0 +1,17 @@
+{
+  "skill_name": "service-hardening",
+  "evals": [
+    {
+      "id": 1,
+      "prompt": "Mỗi lần deploy lên Kubernetes là bị một loạt lỗi 502 vài giây. App Node.js Express. Fix giúp.",
+      "expected_output": "Diagnoses keepAliveTimeout vs LB idle timeout and missing graceful shutdown/readiness; implements drain sequence on SIGTERM, readiness 503, PID 1 signal handling, tests for in-flight completion.",
+      "files": []
+    },
+    {
+      "id": 2,
+      "prompt": "We are about to launch our API to production next week. Can you review the server setup for anything missing?",
+      "expected_output": "Walks the go-live checklist: inbound/outbound timeouts, load shedding, probes, body limits, request ids, shutdown; adds tests for the risky ones and recommends a load test recorded with the benchmark template.",
+      "files": []
+    }
+  ]
+}

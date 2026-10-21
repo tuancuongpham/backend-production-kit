@@ -1,0 +1,24 @@
+{
+  "name": "backend-production-kit",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "Reference code and verification tests for the backend-production-kit skills.",
+  "engines": {
+    "node": ">=24"
+  },
+  "scripts": {
+    "verify:up": "docker compose -f verify/docker-compose.yml up -d --wait",
+    "verify:down": "docker compose -f verify/docker-compose.yml down -v",
+    "test": "node --test --test-concurrency=1 \"verify/tests/*.test.ts\"",
+    "test:unit": "node --test verify/tests/pii-redaction.test.ts verify/tests/llm-gateway.test.ts verify/tests/service-hardening.test.ts verify/tests/sse-streaming.test.ts verify/tests/llm-observability.test.ts verify/tests/adr-writer.test.ts"
+  },
+  "dependencies": {
+    "@opentelemetry/api": "^1.9.0",
+    "@opentelemetry/context-async-hooks": "^2.0.1",
+    "@opentelemetry/core": "^2.0.1",
+    "@opentelemetry/sdk-trace-base": "^2.0.1",
+    "ioredis": "^5.6.1",
+    "pg": "^8.16.0"
+  }
+}

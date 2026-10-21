@@ -1,0 +1,47 @@
+{
+  "skill_name": "llm-gateway",
+  "evals": [
+    {
+      "id": 1,
+      "prompt": "Hóa đơn OpenAI tháng này tăng gấp 3. Mình có 40 khách hàng dùng tính năng tóm tắt ticket. Muốn giới hạn chi phí theo từng khách và biết khách nào tốn nhất.",
+      "expected_output": "Adds per-tenant monthly budget checked before calls, cost ledger with feature/tenant/model, price table in config, FinOps queries and an anomaly alert; offers caching where eligible.",
+      "files": [],
+      "expectations": [
+        "A per-customer (tenant) spend limit is checked before calling OpenAI, and over-limit requests are refused or degraded without making the paid call",
+        "The default configuration actually enforces a cap (not an observe/log-only default that blocks nothing until someone configures it)",
+        "Concurrent requests cannot push a customer materially past its hard limit (atomic reservation or equivalent), and a test exercises concurrent requests against the limit",
+        "Every LLM call records usage with customer id, feature, model, input tokens, output tokens and computed cost",
+        "Model prices live in a config/price table rather than being hardcoded inside the call logic",
+        "Queries or a dashboard show cost per customer and identify the top spenders",
+        "There is an anomaly/spike alert comparing recent spend against a baseline (not just a fixed monthly cap)",
+        "Unchanged tickets are not re-summarized (cache keyed on content/hash, or skip-if-unchanged), addressing a likely cause of the 3x bill",
+        "A test injects a failing usage/ledger write and asserts the user's request still succeeds",
+        "The behaviour at the limit (hard stop vs cheaper model vs alert only) is surfaced as a decision with a chosen default"
+      ]
+    },
+    {
+      "id": 2,
+      "prompt": "Anthropic API keeps returning 529 overloaded during peak hours and our app just errors out. Add fallback to another model.",
+      "expected_output": "Provider chain with per-attempt timeout, fallback only on retryable statuses, circuit breaker, response marks which model answered, tests for 529 fallback and 400 no-fallback.",
+      "files": []
+    },
+    {
+      "id": 3,
+      "prompt": "add a semantic cache in front of our LLM calls so similar questions dont cost money twice",
+      "expected_output": "Warns about negation/false hits, scopes cache by tenant+system prompt, only for deterministic single-question requests, threshold tuned with a labelled eval set, tests.",
+      "files": [],
+      "expectations": [
+        "The output warns that semantic caching can return wrong answers for similar-but-different requests AND mitigates it in code: either semantic serving is disabled/shadow by default, or a guard/test shows a high-similarity different-intent pair (e.g. negation) is not served",
+        "Cache entries are scoped so they never cross tenants (and the system prompt/model is part of the scope or key)",
+        "Requests with temperature > 0 are not cached by default",
+        "Tool-calling, live-data or personalised requests are excluded from caching (or opt-in only)",
+        "Semantic serving is off or in shadow mode by default until the threshold has been evaluated",
+        "The similarity threshold is configurable and the output recommends tuning it on labelled real queries before enabling",
+        "Cache entries expire (TTL or invalidation)",
+        "An exact-match cache lookup happens before the embedding/semantic lookup",
+        "Tests exist for: paraphrase hit, unrelated-query miss, and a cross-tenant miss on the semantic (paraphrase) path, not only on exact text",
+        "Multi-turn conversations are excluded from semantic matching or handled explicitly (history changes meaning)"
+      ]
+    }
+  ]
+}

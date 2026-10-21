@@ -1,0 +1,31 @@
+# Go-live checklist
+
+Tick each item, or write down why it doesn't apply. Items marked 🧪 should have an automated test.
+
+## Requests
+- [ ] 🧪 Inbound: headers timeout, request timeout, keep-alive timeout > LB idle timeout
+- [ ] 🧪 Body size limit on every endpoint that reads a body (413)
+- [ ] 🧪 Load shedding: 503 + `Retry-After` beyond max in-flight
+- [ ] 🧪 Client disconnect cancels downstream work (DB, HTTP, LLM)
+- [ ] Every outbound call has a deadline; retries are bounded with jittered backoff and only for idempotent operations
+- [ ] Per-tenant / per-user rate limits (see `rate-limiting`)
+
+## Lifecycle
+- [ ] 🧪 SIGTERM → readiness 503 → drain → in-flight finish → hooks → exit, all within the platform grace period
+- [ ] Process is PID 1 or behind an init (`tini`, `--init`), so signals arrive
+- [ ] 🧪 `/livez` has no dependency checks; `/readyz` checks deps with timeouts
+- [ ] Startup validates config and fails fast
+- [ ] DB pool size × instances ≤ DB `max_connections` (minus headroom for migrations and admin)
+
+## Observability
+- [ ] Request id generated or propagated and present in every log line
+- [ ] Structured logs with PII redaction (see `pii-redaction`)
+- [ ] Traces cover HTTP → DB → external/LLM (see `llm-observability`)
+- [ ] RED metrics per route (rate, errors, duration p50/p95/p99), plus in-flight and shed counts
+- [ ] Alerts on error-rate and latency SLOs, not on CPU
+
+## Resilience
+- [ ] Load test at 2× peak: numbers recorded in a benchmark doc
+- [ ] Rolling deploy under load: zero deploy-caused 5xx
+- [ ] Dependency failure drill: kill or slow the DB/Redis/LLM provider (Toxiproxy) and observe graceful degradation
+- [ ] Runbook: how to roll back, how to replay dead letters, who is on call

@@ -1,0 +1,26 @@
+-- Webhook inbox: every inbound event is stored once, then processed asynchronously.
+-- UNIQUE (provider, event_id) is what makes retries/duplicates from the provider harmless.
+CREATE TABLE IF NOT EXISTS webhook_inbox (
+  id              bigserial PRIMARY KEY,
+  provider        text NOT NULL,                -- 'stripe', 'vnpay', 'momo', 'github', ...
+  event_id        text NOT NULL,                -- provider's id (or a hash of the payload if it has none)
+  event_type      text NOT NULL,
+  payload         jsonb NOT NULL,
+  source          text NOT NULL DEFAULT 'webhook' CHECK (source IN ('webhook', 'reconcile')),
+  status          text NOT NULL DEFAULT 'pending' CHECK (status IN ('pending', 'processing', 'done', 'dead')),
+  attempts        int  NOT NULL DEFAULT 0,
+  next_attempt_at timestamptz NOT NULL DEFAULT now(),
+  locked_at       timestamptz,
+  last_error      text,
+  received_at     timestamptz NOT NULL DEFAULT now(),
+  processed_at    timestamptz,
+  UNIQUE (provider, event_id)
+);
+
+-- Worker claim paths: ready-to-run rows, and rows stuck in 'processing' after a crash.
+CREATE INDEX IF NOT EXISTS webhook_inbox_ready_idx ON webhook_inbox (next_attempt_at) WHERE status = 'pending';
+CREATE INDEX IF NOT EXISTS webhook_inbox_stuck_idx ON webhook_inbox (locked_at) WHERE status = 'processing';
+-- Dead-letter view for dashboards/alerts.
+CREATE OR REPLACE VIEW webhook_dead_letters AS
+  SELECT id, provider, event_id, event_type, attempts, last_error, received_at
+  FROM webhook_inbox WHERE status = 'dead';

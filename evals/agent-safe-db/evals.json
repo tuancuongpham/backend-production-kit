@@ -1,0 +1,39 @@
+{
+  "skill_name": "agent-safe-db",
+  "evals": [
+    {
+      "id": 1,
+      "prompt": "Mình đang làm chatbot CSKH cho shop, muốn cho nó tra cứu đơn hàng trong Postgres (bảng orders, customers). Viết giúp tool query_db cho agent dùng AI SDK.",
+      "expected_output": "Asks the decision questions (named tools vs raw SQL, columns, PII masking); creates agent_api schema with masked security_barrier views, a separate read-only role with timeouts, and a tool executor with typed params, READ ONLY transaction, tenant from auth context, row cap and audit; includes tests proving writes are denied.",
+      "files": [],
+      "expectations": [
+        "The agent connects with a dedicated database role that is separate from the main app role and is granted only SELECT (no INSERT/UPDATE/DELETE/DDL privileges are granted to it anywhere in the SQL)",
+        "Customer PII (email and phone) is masked or omitted at the database level — in the views or column grants the agent role reads — so the agent role cannot read raw values at all (masking only in application code after the query does not count)",
+        "A statement timeout is enforced for agent queries (role-level setting or per-call SET LOCAL / set_config)",
+        "The model only supplies typed parameters to predefined, developer-written queries; it cannot submit free-form SQL, and parameters are validated before reaching the database",
+        "Rows are scoped to the authenticated customer/tenant taken from the server-side session, never from model-supplied arguments. A guest/unauthenticated path that scopes rows by identifiers the model extracts from chat (order code, phone, email) FAILS this unless it is disabled by default and recorded as a decision with its risk",
+        "Row scoping is enforced inside the database (views filtered on a session setting set by the trusted executor, or RLS policies), not only by WHERE clauses in each tool's SQL",
+        "Results are capped to a maximum number of rows",
+        "Every tool call is audit-logged with all of: tool name, caller identity (user/customer id), the call parameters, and row count or outcome",
+        "A test connects as the agent role, turns read-only mode off (or bypasses the read-only transaction), attempts a write, and asserts SQLSTATE 42501 / permission denied — proving the GRANT boundary rather than the read-only guard"
+      ]
+    },
+    {
+      "id": 2,
+      "prompt": "we want a text-to-SQL feature so our ops team can ask questions about the orders db in plain english via an LLM. just let the model write the SQL and run it, keep it simple",
+      "expected_output": "Explains that raw SQL makes set_config/read_only non-boundaries, recommends named tools, and if raw SQL is kept requires a replica/single-tenant scope, SQL parsing allowlist and the role-level controls; records the trade-off in an ADR.",
+      "files": [],
+      "expectations": [
+        "The output explains the raw-SQL-specific risk: session-level settings (read_only, statement_timeout, set_config-based scoping) can be changed by model-written SQL and therefore are not security boundaries (a generic 'LLM output is untrusted' warning does not count)",
+        "The output offers parameterized/named query tools as the safer option (as the recommendation or as a documented alternative)",
+        "Model-written SQL runs under a database role whose privileges are limited by GRANTs to SELECT on specific objects (a hard boundary, not just read-only transaction mode)",
+        "Generated SQL is validated before execution to a single read-only statement, rejecting multiple statements AND explicitly rejecting set_config/current_setting/SET",
+        "A statement timeout and a row cap are enforced on executed queries",
+        "PII exposure is limited (masked/omitted columns via views) and/or queries run against a read replica",
+        "The agent role cannot create objects even if read_only is switched off: CREATE on schema public and TEMPORARY on the database are revoked for it (or this is tested)",
+        "A test turns read-only mode off (or bypasses the read-only transaction), attempts DML/DDL as the agent role, and asserts SQLSTATE 42501 / permission denied",
+        "The trade-off of keeping raw SQL is recorded in a decision document (ADR or DECISIONS.md) with the chosen safeguards"
+      ]
+    }
+  ]
+}

@@ -1,0 +1,17 @@
+{
+  "skill_name": "pii-redaction",
+  "evals": [
+    {
+      "id": 1,
+      "prompt": "Logs của mình đang đẩy lên Grafana Loki, mà trong log có cả email với số điện thoại khách. Dùng pino. Che giúp mình mấy thông tin đó trước khi ghi log.",
+      "expected_output": "Adds a redactor at the pino formatter/hook level with key-based and pattern-based redaction (email, VN phone, CCCD, Luhn-checked cards, tokens), fixture tests for redacts/keeps, and a test through the real logger config.",
+      "files": []
+    },
+    {
+      "id": 2,
+      "prompt": "Our Sentry events include request bodies with credit card numbers sometimes. Fix it.",
+      "expected_output": "Adds beforeSend redaction via redactValue covering message and stack, explains not logging bodies, adds tests with card/email fixtures.",
+      "files": []
+    }
+  ]
+}

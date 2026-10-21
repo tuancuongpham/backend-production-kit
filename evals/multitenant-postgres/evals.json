@@ -1,0 +1,17 @@
+{
+  "skill_name": "multitenant-postgres",
+  "evals": [
+    {
+      "id": 1,
+      "prompt": "Building a B2B helpdesk SaaS. Each company has its own knowledge base articles and we want RAG search over them with pgvector. All companies in one Postgres. How should I set up the schema so one company never sees another's docs?",
+      "expected_output": "Schema with tenant_id + RLS ENABLE+FORCE + WITH CHECK, transaction-local set_config, composite FKs, app role not superuser/BYPASSRLS, hybrid search with RRF, RLS audit in CI and isolation tests.",
+      "files": []
+    },
+    {
+      "id": 2,
+      "prompt": "khách A vừa report là thấy được tài liệu của khách B trong kết quả tìm kiếm. hệ thống dùng chung 1 database postgres, có cột workspace_id. tìm nguyên nhân và sửa triệt để",
+      "expected_output": "Investigates missing filters, proposes RLS as the structural fix (policies, FORCE, local GUC, non-superuser role), adds the cross-tenant tests and CI audit.",
+      "files": []
+    }
+  ]
+}

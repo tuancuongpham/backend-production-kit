@@ -1,0 +1,17 @@
+{
+  "skill_name": "sse-streaming",
+  "evals": [
+    {
+      "id": 1,
+      "prompt": "Làm giao diện chat AI kiểu ChatGPT, chữ hiện ra từng chút. Backend Node, gọi Claude API. Khi user đóng tab thì phải dừng gọi API luôn cho đỡ tốn tiền.",
+      "expected_output": "SSE endpoint with correct headers, heartbeat, token streaming with backpressure, abort signal passed into the SDK call, done event with usage, TTFT metric, tests for disconnect cancellation.",
+      "files": []
+    },
+    {
+      "id": 2,
+      "prompt": "We have an ops dashboard that should update live when new orders come in. Multiple app instances behind a load balancer.",
+      "expected_output": "SSE feed with monotonic ids, Last-Event-ID replay from Redis Streams or Postgres, pub/sub fan-out, lossy trySend for slow clients, reset on gap, tenant authorization.",
+      "files": []
+    }
+  ]
+}

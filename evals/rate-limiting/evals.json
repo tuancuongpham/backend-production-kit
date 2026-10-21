@@ -1,0 +1,17 @@
+{
+  "skill_name": "rate-limiting",
+  "evals": [
+    {
+      "id": 1,
+      "prompt": "Thêm rate limit cho API /v1/chat theo từng tenant, gói free 20 request/phút, gói pro 200. Có Redis rồi.",
+      "expected_output": "Asks/decides failure mode (fail-closed for LLM route), token bucket Lua with server time, ioredis fail-fast options, timeout+breaker, 429 with Retry-After, atomicity and Redis-down tests.",
+      "files": []
+    },
+    {
+      "id": 2,
+      "prompt": "our login endpoint is getting brute-forced. add throttling per IP and per username",
+      "expected_output": "Rate limits keyed per IP (trusted proxy header) and per username, fail-closed on login, Retry-After, tests including Redis down.",
+      "files": []
+    }
+  ]
+}

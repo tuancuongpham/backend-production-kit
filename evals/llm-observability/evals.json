@@ -1,0 +1,17 @@
+{
+  "skill_name": "llm-observability",
+  "evals": [
+    {
+      "id": 1,
+      "prompt": "Bot trả lời sai chính sách đổi trả cho khách, mà mình không biết lúc đó nó đã lấy tài liệu nào để trả lời. Làm sao để lần sau debug được?",
+      "expected_output": "OTel setup + retrieval span with document ids/versions + LLM span with redacted prompt/response, tokens, cost, prompt version, trace id returned to client; Langfuse export; tests with in-memory exporter.",
+      "files": []
+    },
+    {
+      "id": 2,
+      "prompt": "Set up Langfuse tracing for our Node backend that uses the Anthropic SDK and Postgres, including background jobs from our queue.",
+      "expected_output": "OTel bootstrap loaded first, collector or direct OTLP export, withLlmSpan around SDK calls, trace context injected into queue messages and extracted in workers, redaction policy decision.",
+      "files": []
+    }
+  ]
+}

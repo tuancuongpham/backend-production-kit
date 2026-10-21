@@ -1,0 +1,13 @@
+{
+  "name": "backend-production-kit",
+  "owner": {
+    "name": "Pham Tuan Cuong"
+  },
+  "plugins": [
+    {
+      "name": "backend-production-kit",
+      "source": "./",
+      "description": "Production backend patterns for AI-era SaaS, each with decision points and verification tests."
+    }
+  ]
+}

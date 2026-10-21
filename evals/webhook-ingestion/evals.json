@@ -1,0 +1,40 @@
+{
+  "skill_name": "webhook-ingestion",
+  "evals": [
+    {
+      "id": 1,
+      "prompt": "Tích hợp VNPay IPN cho website bán khóa học. Hiện tại cứ có IPN là mình update đơn thành paid luôn trong handler. Thỉnh thoảng bị cộng tiền 2 lần. Làm lại cho chuẩn.",
+      "expected_output": "Verifies HMAC-SHA512 on raw params, stores into inbox with unique event id, returns the VNPay RspCode body, processes async with backoff + DLQ, idempotent handler, reconciliation via querydr, tests for duplicates.",
+      "files": [],
+      "expectations": [
+        "The IPN signature is verified with HMAC-SHA512 over the vnp_ parameters sorted by key, excluding vnp_SecureHash and vnp_SecureHashType, using a constant-time comparison",
+        "Duplicate IPNs are prevented at the database level (unique constraint on the transaction/event key and/or conditional UPDATE ... WHERE status = 'pending'), not by a check-then-insert in application code",
+        "The handler responds with VNPay's expected JSON RspCode/Message for each case (at least 00 success, 97 invalid signature, 01 order not found, 02 already confirmed, 04 invalid amount)",
+        "The IPN amount is checked against the server-side stored amount (order or payment attempt), and a test covers an amount mismatch being rejected with nothing credited",
+        "Marking the order paid and recording the payment happen atomically (single transaction or single conditional statement), so a crash or concurrent IPN cannot credit twice",
+        "Every received IPN is persisted in an inbox/event table with a unique key, and crediting happens in a separate worker/async step rather than inside the IPN request",
+        "Failed processing is retried with backoff, ends in a dead-letter state after a maximum number of attempts, and a replay mechanism is implemented in code (function/CLI/endpoint)",
+        "A reconciliation path exists for missed/unclear IPNs (scheduled query via VNPay querydr API or a job that re-checks pending orders)",
+        "The Return URL handler never writes payment or order state (display only)",
+        "A test sends the same IPN multiple times concurrently (and/or again after success) and asserts the business effect happened exactly once by counting payment/ledger/enrollment rows"
+      ]
+    },
+    {
+      "id": 2,
+      "prompt": "Add a Stripe webhook endpoint to our Express app for payment_intent.succeeded and charge.refunded.",
+      "expected_output": "Raw body + Stripe signature verification with tolerance, inbox table, worker with SKIP LOCKED, state-based ordering handling, replay CLI, reconciliation with events.list, tests.",
+      "files": [],
+      "expectations": [
+        "Signature verification uses the raw request body on the webhook route (e.g. express.raw before JSON parsing) with stripe.webhooks.constructEvent or an equivalent check including timestamp tolerance",
+        "Each event is stored with a unique constraint on the Stripe event id so redeliveries are deduplicated",
+        "The endpoint acknowledges with 2xx quickly and does the business processing asynchronously (worker/queue), or explicitly justifies inline processing",
+        "Out-of-order delivery is handled (e.g. charge.refunded before payment_intent.succeeded) via state checks, event timestamps/versions, or refetching the object from Stripe",
+        "Failed processing is retried with backoff and ends in a dead-letter state after a maximum number of attempts",
+        "A replay mechanism is implemented as code (function, CLI or admin endpoint); a manual SQL statement documented in a README does not count",
+        "A reconciliation job is implemented in code that lists events/objects from the Stripe API to catch missed webhooks (advice in a README does not count)",
+        "Signature tests generate signatures with Stripe's own tooling (stripe.webhooks.generateTestHeaderString) or a known-good captured fixture, not by re-implementing the same HMAC the verifier uses",
+        "A duplicate-delivery test asserts the business effect is applied once through the worker/handler path (not only that the inbox stores one row)"
+      ]
+    }
+  ]
+}

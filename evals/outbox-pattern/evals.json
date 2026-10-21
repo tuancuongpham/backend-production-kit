@@ -1,0 +1,17 @@
+{
+  "skill_name": "outbox-pattern",
+  "evals": [
+    {
+      "id": 1,
+      "prompt": "After an order is created we publish order.created to Kafka from the same request handler. Sometimes the event is missing even though the order exists. What is the right way?",
+      "expected_output": "Explains dual-write problem, implements transactional outbox in the same transaction, single-active relay preserving order, consumer dedup table, tests for crash-before-mark and broker outage.",
+      "files": []
+    },
+    {
+      "id": 2,
+      "prompt": "Mình muốn khi user upload hợp đồng thì hệ thống gọi LLM tóm tắt, nhưng không muốn request phải chờ. Thiết kế giúp phần bất đồng bộ.",
+      "expected_output": "Writes the domain event via outbox in the upload transaction, a consumer that runs the LLM step with consumeOnce dedup, propagates trace context in headers; does not propose full event sourcing.",
+      "files": []
+    }
+  ]
+}

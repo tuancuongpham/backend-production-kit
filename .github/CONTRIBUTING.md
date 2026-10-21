@@ -39,11 +39,24 @@ npm run verify:down
 ## Before you open a pull request
 
 ```bash
+npm run validate      # SKILL.md frontmatter, links, eval sets
 npm run verify:up
 npm test
+npm run bench         # if you touched a hot path: compare with docs/performance.md
 ```
 
-CI runs the same tests against Postgres and Redis service containers on every pull request.
+CI runs the same checks against Postgres and Redis service containers on every pull request.
+
+- **Found a bug in reference code?** Add a failing test to `verify/tests/latent-bugs.test.ts` first, then fix
+  it and add the lesson to the skill's *Common mistakes*, so agents stop repeating it.
+
+## Releasing
+
+1. Bump `version` in `package.json` and `.claude-plugin/plugin.json`, and add a `## <version>` section to
+   `CHANGELOG.md`.
+2. Commit, then tag and push: `git tag v<version> && git push origin v<version>`.
+3. The Release workflow re-runs every check, packages each skill as a `.skill` file plus a kit zip, and
+   publishes the GitHub release with the changelog section as notes.
 
 - **Every claim in a SKILL.md needs a test.** If a skill says "duplicates are processed once" or "the agent role
   cannot write", `verify/tests` should prove it. Tests must prove the real boundary: for example, a write test

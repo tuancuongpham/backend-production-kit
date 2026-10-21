@@ -53,3 +53,5 @@ ADR: failure mode per endpoint class (with the reason), subject choice, limits p
 - Using app-server `Date.now()` inside distributed state: clock skew equals free tokens.
 - Trusting `X-Forwarded-For` from anyone: attackers rotate it and get unlimited buckets.
 - No `Retry-After`: clients retry immediately and amplify the overload.
+- Evicting the local fallback map in insertion order. JavaScript's `Map.set` on an existing key keeps its old position, so the *busiest* subject is the oldest entry and the first to be evicted, coming back with a full bucket during an outage. Delete and re-insert on every access (true LRU).
+- Sending the whole Lua script on every request. Use `EVALSHA` with an `EVAL` fallback on `NOSCRIPT` (after a restart or failover). This saves bandwidth on real networks; on localhost the difference is not measurable.

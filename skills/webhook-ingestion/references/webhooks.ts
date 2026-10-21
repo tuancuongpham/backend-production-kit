@@ -88,6 +88,14 @@ export interface WorkerOptions {
   stuckAfterSec?: number; // re-claim 'processing' rows older than this (worker crashed); default 300
   random?: () => number; // injectable for tests
   onDead?: (row: InboxRow, error: unknown) => void; // alert here
+  /**
+   * Rows of one claimed batch processed in parallel (each in its own transaction). Default 1.
+   * Handlers are I/O-bound (DB writes, provider API calls), so 4–8 cuts drain time several-fold.
+   * Raise it only when handlers are safe to run concurrently for *different* events of the same
+   * object — e.g. they lock the order row (SELECT … FOR UPDATE) or apply state changes conditionally.
+   * Keep it ≤ the pool size minus what the claim query and the rest of the app need.
+   */
+  concurrency?: number;
 }
 
 /** Exponential backoff with "equal jitter": never ~0, never synchronized across rows. */
@@ -156,8 +164,16 @@ export function createInboxWorker(o: WorkerOptions) {
   /** One polling tick. Run it on an interval (and/or on LISTEN/NOTIFY) from a worker process. */
   async function processOnce() {
     const rows = await claim();
-    const results = [];
-    for (const row of rows) results.push(await processRow(row));
+    const results: Array<Awaited<ReturnType<typeof processRow>>> = new Array(rows.length);
+    let next = 0;
+    // A fixed number of lanes pulling from the batch: bounded parallelism, results in claim order.
+    const lane = async () => {
+      while (next < rows.length) {
+        const i = next++;
+        results[i] = await processRow(rows[i]);
+      }
+    };
+    await Promise.all(Array.from({ length: Math.max(1, Math.min(o.concurrency ?? 1, rows.length)) }, lane));
     return results;
   }
 

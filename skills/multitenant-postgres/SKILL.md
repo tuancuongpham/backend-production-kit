@@ -49,3 +49,4 @@ ADR: isolation model, keyword ranker (ts_rank vs BM25 extension), embedding mode
 - `SECURITY DEFINER` functions or views owned by a BYPASSRLS role. They skip policies; review each one.
 - Filtering vectors *after* `LIMIT` in app code. Isolation holds, but a small tenant gets almost no results.
 - Forgetting background workers, cron jobs and admin scripts. With FORCE they see nothing, which is correct, but it surprises people; give them an explicit tenant loop.
+- `SET LOCAL hnsw.iterative_scan` on pgvector 0.5–0.7 (still common on managed hosts). Once the library is loaded, `hnsw.` is a reserved prefix, so the statement fails on every *reused* pooled connection and aborts the transaction: an intermittent outage. Set it only when `pg_settings` has it, as `hybridSearch()` does.

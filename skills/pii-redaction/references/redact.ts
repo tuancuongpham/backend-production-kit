@@ -6,7 +6,13 @@ import { createHmac } from 'node:crypto';
 
 export interface Detector {
   name: string; // used in the placeholder: [EMAIL], [PHONE]...
-  pattern: RegExp; // must be global (g)
+  /**
+   * Must be global (g). Keep every quantifier bounded ({1,64}, not +): logs carry attacker-controlled
+   * strings, and an unbounded quantifier that fails late turns one big log line into an O(n²) scan.
+   */
+  pattern: RegExp;
+  /** Cheap non-global pre-check; the full pattern only runs when it matches (most strings have no PII). */
+  hint?: RegExp;
   /** Optional extra check to cut false positives (e.g. Luhn for cards). */
   validate?: (match: string) => boolean;
 }
@@ -18,6 +24,8 @@ export interface RedactorOptions {
   sensitiveKeys?: RegExp;
   detectors?: Detector[];
   maxDepth?: number;
+  /** Longer strings are truncated before scanning (bounds CPU per log line). Default 16 KiB. */
+  maxStringLength?: number;
 }
 
 export function luhnValid(digits: string): boolean {
@@ -36,17 +44,20 @@ export function luhnValid(digits: string): boolean {
 }
 
 // Order matters: secrets first (they may contain digits/emails), then specific → generic.
+const THREE_DIGITS = /\d\d\d/;
+
 export const defaultDetectors: Detector[] = [
-  { name: 'JWT', pattern: /\beyJ[A-Za-z0-9_-]{5,}\.[A-Za-z0-9_-]{5,}\.[A-Za-z0-9_-]{5,}/g },
-  { name: 'BEARER', pattern: /\b(Bearer|Basic)\s+[A-Za-z0-9._~+/-]{8,}=*/gi },
-  { name: 'API_KEY', pattern: /\b(?:sk|pk|rk|whsec)[-_](?:live|test|proj|ant)?[-_]?[A-Za-z0-9_-]{16,}/g },
-  { name: 'EMAIL', pattern: /[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}/g },
+  { name: 'JWT', hint: /eyJ/, pattern: /\beyJ[A-Za-z0-9_-]{5,4096}\.[A-Za-z0-9_-]{5,8192}\.[A-Za-z0-9_-]{5,1024}/g },
+  { name: 'BEARER', hint: /bearer|basic/i, pattern: /\b(Bearer|Basic)\s{1,8}[A-Za-z0-9._~+/-]{8,4096}={0,2}/gi },
+  { name: 'API_KEY', hint: /(?:sk|pk|rk|whsec)[-_]/, pattern: /\b(?:sk|pk|rk|whsec)[-_](?:live|test|proj|ant)?[-_]?[A-Za-z0-9_-]{16,256}/g },
+  // RFC 5321 limits: local part ≤ 64, domain ≤ 253. The bounds are what keep this linear.
+  { name: 'EMAIL', hint: /@/, pattern: /[A-Za-z0-9._%+-]{1,64}@[A-Za-z0-9.-]{1,253}\.[A-Za-z]{2,24}/g },
   // 13–19 digits, optional single space/dash separators, Luhn-checked so order ids survive.
-  { name: 'CARD', pattern: /(?<!\d)\d(?:[ -]?\d){12,18}(?!\d)/g, validate: luhnValid },
+  { name: 'CARD', hint: THREE_DIGITS, pattern: /(?<!\d)\d(?:[ -]?\d){12,18}(?!\d)/g, validate: luhnValid },
   // Vietnamese citizen ID (CCCD): 12 digits starting with a 0xx province code.
-  { name: 'NATIONAL_ID', pattern: /(?<!\d)0\d{11}(?!\d)/g },
+  { name: 'NATIONAL_ID', hint: THREE_DIGITS, pattern: /(?<!\d)0\d{11}(?!\d)/g },
   // Vietnamese mobile numbers: 0 or +84/84, then 3/5/7/8/9 and 8 digits, separators allowed.
-  { name: 'PHONE', pattern: /(?<![\d+])(?:\+?84|0)[ .-]?[35789](?:[ .-]?\d){8}(?!\d)/g },
+  { name: 'PHONE', hint: THREE_DIGITS, pattern: /(?<![\d+])(?:\+?84|0)[ .-]?[35789](?:[ .-]?\d){8}(?!\d)/g },
 ];
 
 export const defaultSensitiveKeys =
@@ -56,6 +67,9 @@ export function createRedactor(opts: RedactorOptions = {}) {
   const detectors = opts.detectors ?? defaultDetectors;
   const sensitiveKeys = opts.sensitiveKeys ?? defaultSensitiveKeys;
   const maxDepth = opts.maxDepth ?? 8;
+  const maxLen = opts.maxStringLength ?? 16 * 1024;
+  // The shortest thing any default detector matches ("a@b.cd" is 6 chars).
+  const minLen = opts.detectors ? 1 : 6;
 
   const placeholder = (name: string, value: string) =>
     opts.hmacKey
@@ -63,8 +77,10 @@ export function createRedactor(opts: RedactorOptions = {}) {
       : `[${name}]`;
 
   function redactString(input: string): string {
-    let out = input;
+    if (input.length < minLen) return input;
+    let out = input.length > maxLen ? `${input.slice(0, maxLen)}…[TRUNCATED ${input.length - maxLen} chars]` : input;
     for (const d of detectors) {
+      if (d.hint && !d.hint.test(out)) continue;
       out = out.replace(d.pattern, (m) => (d.validate && !d.validate(m) ? m : placeholder(d.name, m)));
     }
     return out;

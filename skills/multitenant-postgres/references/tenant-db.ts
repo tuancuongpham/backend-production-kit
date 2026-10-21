@@ -54,7 +54,14 @@ export interface HybridHit {
 export async function hybridSearch(client: pg.PoolClient, p: HybridSearchParams): Promise<HybridHit[]> {
   // pgvector >= 0.8: keep scanning the HNSW index until enough rows survive the RLS filter.
   // Without this, a small tenant in a big table can get far fewer than `candidates` hits.
-  await client.query(`SET LOCAL hnsw.iterative_scan = relaxed_order`);
+  // Only set it where it exists. On pgvector 0.5–0.7 "hnsw." is a reserved prefix once the library is
+  // loaded, so a plain SET LOCAL fails on every reused pooled connection and aborts the transaction.
+  // The vector cast loads the library first, so pg_settings is accurate (one round trip, two statements).
+  await client.query(
+    `SELECT '[0]'::vector;
+     SELECT set_config('hnsw.iterative_scan', 'relaxed_order', true)
+     WHERE EXISTS (SELECT 1 FROM pg_settings WHERE name = 'hnsw.iterative_scan')`,
+  );
   const { rows } = await client.query<HybridHit>(
     `WITH semantic AS (
        SELECT id, rank() OVER (ORDER BY dist) AS rank

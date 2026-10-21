@@ -2,10 +2,13 @@
 // when Redis is slow or down. Redis client should be created with:
 //   new Redis(url, { enableOfflineQueue: false, maxRetriesPerRequest: 1, commandTimeout: 50 })
 // so commands fail fast instead of queueing while disconnected.
+import { createHash } from 'node:crypto';
 import { readFileSync } from 'node:fs';
 import type { Redis } from 'ioredis';
 
 const LUA = readFileSync(new URL('./token-bucket.lua', import.meta.url), 'utf8');
+// EVALSHA sends 40 bytes instead of the whole script on every request; Redis also skips re-hashing it.
+const LUA_SHA = createHash('sha1').update(LUA).digest('hex');
 
 /**
  * What to do when Redis can't answer in time:
@@ -42,13 +45,18 @@ class LocalBuckets {
   #buckets = new Map<string, { tokens: number; ts: number }>();
   #capacity: number;
   #rate: number;
-  constructor(capacity: number, rate: number) {
+  #maxKeys: number;
+  constructor(capacity: number, rate: number, maxKeys = 50_000) {
     this.#capacity = capacity;
     this.#rate = rate;
+    this.#maxKeys = maxKeys;
   }
   take(key: string, cost: number): Omit<LimitResult, 'source'> {
     const now = Date.now();
     const b = this.#buckets.get(key) ?? { tokens: this.#capacity, ts: now };
+    // Re-insert so Map order is least-recently-used first. With plain set() an existing key keeps its
+    // original position, so the busiest (oldest) subject was evicted first and came back with a full bucket.
+    this.#buckets.delete(key);
     b.tokens = Math.min(this.#capacity, b.tokens + ((now - b.ts) * this.#rate) / 1000);
     b.ts = now;
     let allowed = false;
@@ -60,7 +68,7 @@ class LocalBuckets {
       retryAfterMs = Math.ceil(((cost - b.tokens) * 1000) / this.#rate);
     }
     this.#buckets.set(key, b);
-    if (this.#buckets.size > 50_000) this.#buckets.delete(this.#buckets.keys().next().value!); // bound memory
+    if (this.#buckets.size > this.#maxKeys) this.#buckets.delete(this.#buckets.keys().next().value!); // evict LRU
     return { allowed, remaining: Math.floor(b.tokens), retryAfterMs };
   }
 }
@@ -95,8 +103,13 @@ export function createRateLimiter(o: LimiterOptions) {
       timer = setTimeout(() => reject(new Error(`rate limiter: redis timeout after ${timeoutMs}ms`)), timeoutMs);
     });
     try {
-      // In hot paths prefer redis.defineCommand (EVALSHA) to avoid resending the script.
-      const call = o.redis.eval(LUA, 1, key, o.capacity, o.refillPerSec, cost) as Promise<[number, number, number]>;
+      const call = (o.redis.evalsha(LUA_SHA, 1, key, o.capacity, o.refillPerSec, cost) as Promise<[number, number, number]>).catch(
+        (err: Error) => {
+          // First call on this Redis (or after SCRIPT FLUSH / failover): load it once, then it's cached.
+          if (!String(err?.message).startsWith('NOSCRIPT')) throw err;
+          return o.redis.eval(LUA, 1, key, o.capacity, o.refillPerSec, cost) as Promise<[number, number, number]>;
+        },
+      );
       // If the timeout wins, the Redis call may still reject later: swallow it, or Node
       // treats it as an unhandled rejection and kills the process.
       call.catch(() => {});

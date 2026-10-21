@@ -1,0 +1,27 @@
+{
+  "label": "after",
+  "date": "2026-10-21T14:15:46.141Z",
+  "node": "v24.16.0",
+  "results": {
+    "redact: 50 KB string, no @": {
+      "value": 0.22,
+      "unit": "ms/call",
+      "note": "one log line carrying a large payload"
+    },
+    "redact: structured log records": {
+      "value": 134190.54,
+      "unit": "records/s",
+      "note": "10 fields, nested, 3 PII values"
+    },
+    "rate limiter: sequential checks": {
+      "value": 2592.51,
+      "unit": "checks/s",
+      "note": "avg 0.386 ms per check"
+    },
+    "webhook worker: drain 200 events": {
+      "value": 454.34,
+      "unit": "ms",
+      "note": "handler ≈ 5 ms I/O; concurrency 8 where supported"
+    }
+  }
+}

@@ -1,6 +1,6 @@
 {
   "name": "backend-production-kit",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "description": "Production backend patterns for AI-era SaaS: agent-safe DB access, PII redaction, multi-tenant Postgres + hybrid search, webhooks, outbox, rate limiting, service hardening, LLM gateway, LLM observability, SSE streaming, and ADRs. Each skill encodes the decisions to ask about and the tests that prove the property holds.",
   "author": {
     "name": "Pham Tuan Cuong"

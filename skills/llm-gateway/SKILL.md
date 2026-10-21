@@ -79,3 +79,5 @@ ADR: build vs buy, fallback chain and its quality trade-off, semantic cache thre
 - Writing usage synchronously and failing the request when the ledger write fails.
 - Checking the budget with a read (`SELECT sum(cost)`) and then calling: under load, every in-flight request passes the check.
 - Turning the semantic cache on in `serve` mode on day one, with a threshold nobody measured.
+- A model missing from the price table. Its estimate and cost are $0, so the budget silently never limits anything. The reference gateway refuses to start with budgets on and an unpriced model.
+- Computing the budget period twice (once at reserve, once at settle). A call that crosses midnight at month end leaves its reservation stuck in the old month forever. Capture the period once per call.

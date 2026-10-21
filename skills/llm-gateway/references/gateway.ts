@@ -167,6 +167,13 @@ export function createGateway(o: GatewayOptions) {
   const breakerCfg = o.breaker ?? { threshold: 3, cooldownMs: 30_000 };
   const breakers = new Map<string, { failures: number; openUntil: number }>();
 
+  // A model without a price costs "$0": its estimate reserves nothing and its spend never counts,
+  // so the budget silently stops limiting. Refuse that configuration up front.
+  if (o.budget) {
+    const unpriced = o.providers.map((p) => p.model).filter((m) => !o.prices[m]);
+    if (unpriced.length) throw new Error(`llm-gateway: no price configured for model(s) ${unpriced.join(', ')}; budgets cannot be enforced`);
+  }
+
   const period = () => new Date(now()).toISOString().slice(0, 7); // 'YYYY-MM'
 
   function cacheMode(req: ChatRequest): 'eligible' | 'bypass' {
@@ -245,10 +252,12 @@ export function createGateway(o: GatewayOptions) {
 
     // 2. Budget: atomically reserve a pessimistic estimate before spending; settle with the real cost.
     let reserved = 0;
+    // Settle in the period we reserved in, even if the month rolls over while the model generates.
+    const budgetPeriod = period();
     if (o.budget) {
       const limit = await o.budget.monthlyLimitUsd(ctx.tenantId);
       const estimate = o.budget.estimateUsd?.(req) ?? defaultEstimateUsd(o.prices, o.providers.map((p) => p.model), req);
-      if (!(await o.budget.store.reserve(ctx.tenantId, period(), estimate, limit))) {
+      if (!(await o.budget.store.reserve(ctx.tenantId, budgetPeriod, estimate, limit))) {
         record({ provider: null, model: null, cache: 'bypass', inputTokens: 0, outputTokens: 0, costUsd: 0, fallbackFrom: [], ok: false, error: 'budget exceeded' });
         throw new BudgetExceededError(`monthly LLM budget of $${limit} reached for tenant ${ctx.tenantId}`);
       }
@@ -258,7 +267,7 @@ export function createGateway(o: GatewayOptions) {
     const settle = async (actual: number) => {
       if (!o.budget || settled) return;
       settled = true;
-      await o.budget.store.settle(ctx.tenantId, period(), reserved, actual);
+      await o.budget.store.settle(ctx.tenantId, budgetPeriod, reserved, actual);
     };
 
     try {

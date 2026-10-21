@@ -14,6 +14,17 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
+  validate-skills:
+    # frontmatter rules enforced on skill upload, links, eval sets
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+      - name: Validate skills, links and eval sets
+        run: node scripts/validate-skills.mjs
+
   verify:
     runs-on: ubuntu-latest
     services:
@@ -56,3 +67,6 @@ jobs:
 
       - name: Verification tests (real Postgres + Redis)
         run: npm test
+
+      - name: Benchmarks (informational)
+        run: node bench/run.ts ci

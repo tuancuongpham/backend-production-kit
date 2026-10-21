@@ -1,0 +1,81 @@
+name: Release
+
+# Push a tag that matches package.json, e.g.  git tag v0.2.0 && git push origin v0.2.0
+on:
+  push:
+    tags: ['v*']
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: pgvector/pgvector:pg17
+        env:
+          POSTGRES_USER: kit
+          POSTGRES_PASSWORD: kit
+          POSTGRES_DB: kit
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U kit -d kit"
+          --health-interval 2s
+          --health-timeout 3s
+          --health-retries 20
+      redis:
+        image: redis:7-alpine
+        ports:
+          - 6379:6379
+        options: >-
+          --health-cmd "redis-cli ping"
+          --health-interval 2s
+          --health-timeout 3s
+          --health-retries 20
+    env:
+      KIT_PG_URL: postgres://kit:kit@localhost:5432/kit
+      KIT_REDIS_URL: redis://localhost:6379
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: npm
+
+      - name: Tag must match package.json version
+        run: |
+          expected="v$(node -p "require('./package.json').version")"
+          if [ "$expected" != "$GITHUB_REF_NAME" ]; then
+            echo "Tag $GITHUB_REF_NAME does not match package.json ($expected)"; exit 1
+          fi
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Validate skills
+        run: node scripts/validate-skills.mjs
+
+      - name: Verification tests
+        run: npm test
+
+      - name: Package skills
+        # a .skill file is a zip of one skill folder: upload it on claude.ai, or unzip into ~/.claude/skills
+        run: |
+          mkdir -p dist
+          (cd skills && for d in */; do zip -qr "../dist/${d%/}.skill" "${d%/}"; done)
+          zip -qr "dist/backend-production-kit-${GITHUB_REF_NAME}.zip" \
+            .claude-plugin skills evals README.md LICENSE CHANGELOG.md docs
+          ls -l dist
+
+      - name: Release notes from CHANGELOG
+        run: node scripts/release-notes.mjs "${GITHUB_REF_NAME#v}" > dist/NOTES.md
+
+      - name: Publish GitHub release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release create "$GITHUB_REF_NAME" dist/*.skill dist/*.zip \
+            --title "$GITHUB_REF_NAME" --notes-file dist/NOTES.md --verify-tag

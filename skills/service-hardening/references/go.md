@@ -69,8 +69,9 @@ func main() {
 	}()
 
 	<-ctx.Done()
-	draining.Store(true)        // 1. readiness → 503
-	time.Sleep(5 * time.Second) // 2. let the LB notice
+	draining.Store(true)          // 1. readiness → 503; requests that still arrive are served...
+	srv.SetKeepAlivesEnabled(false) // ...and their connections closed, so the next request goes elsewhere
+	time.Sleep(5 * time.Second)   // 2. let the LB notice
 	shutdownCtx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
 	defer cancel()
 	if err := srv.Shutdown(shutdownCtx); err != nil { // 3+4. stop accepting, wait for in-flight

@@ -21,9 +21,9 @@ import { createRedactor } from '../../../skills/pii-redaction/references/redact.
 const CHECKOUT_BURST = 5;
 
 interface ShopOptions {
-  /** Holds every order at the payment step until the test opens it. */
+  /** Holds Lan's orders at the payment step until the test opens it. */
   payment?: Gate;
-  /** On shutdown: how long new requests get 503 while the load balancer notices. */
+  /** On shutdown: how long the instance keeps answering while the load balancer notices. */
   drainMs?: number;
   /** On shutdown: how long in-flight requests may still finish. */
   graceMs?: number;
@@ -57,7 +57,7 @@ async function startShop(o: ShopOptions = {}): Promise<Shop> {
     const order = JSON.parse((await readBody(req, 16 * 1024)).toString('utf8'));
     const fingerprint = requestFingerprint('POST', '/v1/orders', order);
     const result = await idempotency.run({ scope: `shop:${userId}`, key, fingerprint }, async (tx) => {
-      await o.payment?.pass();
+      if (userId === LAN) await o.payment?.pass();
       const { rows } = await tx.query(`INSERT INTO orders (user_id, sku, qty, note) VALUES ($1, $2, $3, $4) RETURNING id`, [userId, order.sku, order.qty, order.note ?? null]);
       log('order created', { userId, order });
       return { status: 201, body: { orderId: Number(rows[0].id), note: order.note ?? null } };
@@ -183,9 +183,11 @@ describe('journey: a shopper pays for her order', () => {
     const cutOff = pay(old, key).catch((err: Error) => err);
     await payment.reached;
     const deploy = old.shutdown();
-    // Until the load balancer notices, the old instance turns new requests away instead of half-serving them.
-    const turnedAway = await pay(old, randomUUID());
-    assert.deepEqual([turnedAway.status, turnedAway.headers['retry-after'], turnedAway.headers.connection], [503, '1', 'close']);
+    // Until the load balancer notices, the old instance still answers what it is sent (a 503 here is the deploy error
+    // the drain exists to avoid), and closes each connection after its answer: Minh's next request opens a new one,
+    // which goes to the new instance.
+    const minh = await pay(old, randomUUID(), { user: 'u-minh' });
+    assert.deepEqual([minh.status, minh.headers.connection], [201, 'close']);
     assert.ok((await cutOff) instanceof Error, 'the grace period ran out and closed her connection');
     // Her app retries on the new instance while the old one is still finishing her payment.
     const meanwhile = await pay(next, key);

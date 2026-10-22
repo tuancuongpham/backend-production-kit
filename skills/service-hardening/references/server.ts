@@ -15,8 +15,7 @@ export interface RequestContext {
    * Aborted when a shutdown stops taking requests: after the drain delay, once the load balancer sends traffic
    * elsewhere. Long-lived responses end on it, so their clients reconnect to an instance that stays: event streams
    * (`openSse(req, res, { closeOn: ctx.shuttingDown })`), long polls. Short requests ignore it and finish within the
-   * grace period. Ending a stream earlier would send its reconnect back here, into a 503, which makes EventSource
-   * give up for good.
+   * grace period. Ending a stream earlier would send its reconnect back here, still draining, only to be ended again.
    */
   shuttingDown: AbortSignal;
 }
@@ -30,7 +29,10 @@ export interface HardenedServerOptions {
   /** Must exceed the load balancer's idle timeout (ALB 60s, GCLB 600s), or the LB reuses dead sockets → 502s. */
   keepAliveTimeoutMs?: number; // default 65s
   readinessChecks?: Array<() => Promise<unknown>>;
-  /** After readiness flips to 503, keep serving while the LB/K8s endpoints notice. */
+  /**
+   * After readiness flips to 503, keep serving while the LB/K8s endpoints notice: requests that still arrive are
+   * answered, each with `Connection: close`, so the client's next request opens a connection that goes elsewhere.
+   */
   drainDelayMs?: number; // default 5s
   /** Max wait for in-flight requests. Keep below K8s terminationGracePeriodSeconds (default 30s). */
   shutdownGraceMs?: number; // default 20s
@@ -122,21 +124,40 @@ export function deadline(ms: number, parent?: AbortSignal): AbortSignal {
 const REQUEST_ID_RE = /^[A-Za-z0-9._-]{1,128}$/;
 
 /**
+ * A duration or count from the options. A number read from an unset environment variable is NaN, and NaN compares
+ * false with everything: maxInFlight would shed nothing, a NaN grace period would cut every request at once. Refused
+ * at startup instead.
+ */
+function setting(name: string, value: number | undefined, fallback: number, min: number): number {
+  const v = value ?? fallback;
+  if (!Number.isFinite(v) || v < min) throw new RangeError(`hardened server: ${name} must be a number of at least ${min}, got ${v}`);
+  return v;
+}
+
+/**
  * A plain object of closures rather than a class instance: `shutdown` is meant to be handed to signal handlers and
  * shutdown hooks (`installSignalHandlers(app.shutdown)`), where a detached class method would lose `this`.
  */
 export function createHardenedServer(o: HardenedServerOptions) {
-  const maxInFlight = o.maxInFlight ?? 256;
+  const maxInFlight = setting('maxInFlight', o.maxInFlight, 256, 1);
+  const drainDelayMs = setting('drainDelayMs', o.drainDelayMs, 5_000, 0);
+  const shutdownGraceMs = setting('shutdownGraceMs', o.shutdownGraceMs, 20_000, 0);
+  const rejectLingerMs = setting('rejectLingerMs', o.rejectLingerMs, 2_000, 0);
+  const headersTimeoutMs = setting('headersTimeoutMs', o.headersTimeoutMs, 10_000, 0);
+  const requestTimeoutMs = setting('requestTimeoutMs', o.requestTimeoutMs, 30_000, 0);
+  const keepAliveTimeoutMs = setting('keepAliveTimeoutMs', o.keepAliveTimeoutMs, 65_000, 0);
   const log = o.log ?? (() => {});
   let inFlight = 0;
-  let draining = false;
+  // serving → draining (readiness says 503, requests are still answered) → stopping (no new connections; a request
+  // arriving on one still open gets a 503).
+  let phase: 'serving' | 'draining' | 'stopping' = 'serving';
   let onIdle: (() => void) | null = null;
   let shutdownPromise: Promise<{ forced: boolean }> | null = null;
   const stopping = new AbortController(); // RequestContext.shuttingDown
   setMaxListeners(0, stopping.signal); // one listener per open stream, each removed when its stream ends
 
   async function ready(): Promise<boolean> {
-    if (draining) return false;
+    if (phase !== 'serving') return false;
     try {
       await Promise.all((o.readinessChecks ?? []).map((check) => withTimeout(Promise.resolve().then(check), 1000, () => new Error('readiness check timeout'))));
       return true;
@@ -155,7 +176,11 @@ export function createHardenedServer(o: HardenedServerOptions) {
       const ok = await ready();
       return void res.writeHead(ok ? 200 : 503, { 'content-type': 'text/plain' }).end(ok ? 'ready' : 'not ready');
     }
-    if (draining) return void res.writeHead(503, { connection: 'close', 'retry-after': '1' }).end('shutting down');
+    if (phase === 'stopping') return void res.writeHead(503, { connection: 'close', 'retry-after': '1' }).end('shutting down');
+    // Draining: the load balancer may still send requests until it notices readiness. Answer them (a 503 now is
+    // the deploy error the drain delay exists to avoid), and close the connection afterwards, so the client's next
+    // request opens a new one, which the load balancer sends to an instance that stays.
+    if (phase === 'draining') res.setHeader('connection', 'close');
     if (inFlight >= maxInFlight) {
       // Shedding fast is the point: a quick 503 beats a 30s timeout for everyone.
       return void res.writeHead(503, { 'retry-after': '1' }).end('overloaded');
@@ -175,7 +200,7 @@ export function createHardenedServer(o: HardenedServerOptions) {
     } catch (err) {
       const status = err instanceof PayloadTooLargeError ? 413 : 500;
       log('request failed', { requestId, status, error: String(err) });
-      if (status === 413 && !res.headersSent) rejectRemainingBody(req, res, o.rejectLingerMs ?? 2000);
+      if (status === 413 && !res.headersSent) rejectRemainingBody(req, res, rejectLingerMs);
       if (!res.headersSent) res.writeHead(status, { 'content-type': 'text/plain' }).end(status === 413 ? 'payload too large' : 'internal error');
       else res.destroy();
     } finally {
@@ -184,27 +209,28 @@ export function createHardenedServer(o: HardenedServerOptions) {
     }
   });
 
-  server.headersTimeout = o.headersTimeoutMs ?? 10_000;
-  server.requestTimeout = o.requestTimeoutMs ?? 30_000;
-  server.keepAliveTimeout = o.keepAliveTimeoutMs ?? 65_000;
+  server.headersTimeout = headersTimeoutMs;
+  server.requestTimeout = requestTimeoutMs;
+  server.keepAliveTimeout = keepAliveTimeoutMs;
 
   /**
-   * 1. readiness → 503 (LB stops routing)   2. wait drainDelay
+   * 1. readiness → 503 (LB stops routing)   2. wait drainDelay, still answering what arrives (Connection: close)
    * 3. stop accepting, close idle sockets, end long-lived responses (ctx.shuttingDown)
    * 4. wait for in-flight (≤ grace)         5. force-close the rest   6. run onShutdown hooks
    */
   function shutdown(): Promise<{ forced: boolean }> {
     shutdownPromise ??= (async () => {
-      draining = true;
+      phase = 'draining';
       log('shutdown: draining', { inFlight });
-      await sleep(o.drainDelayMs ?? 5_000);
+      await sleep(drainDelayMs);
+      phase = 'stopping';
       const closed = new Promise<void>((r) => server.close(() => r()));
       server.closeIdleConnections();
       const idle = inFlight === 0 ? Promise.resolve() : new Promise<void>((r) => (onIdle = r));
       stopping.abort(new Error('server shutting down'));
       // withTimeout clears its timer: a bare sleep() in the race would keep the process alive for the whole grace
       // period after a clean drain, and a deploy would wait shutdownGraceMs for nothing.
-      const finished = await withTimeout(idle, o.shutdownGraceMs ?? 20_000, () => new Error('grace period over')).then(
+      const finished = await withTimeout(idle, shutdownGraceMs, () => new Error('grace period over')).then(
         () => true,
         () => false,
       );
@@ -219,13 +245,18 @@ export function createHardenedServer(o: HardenedServerOptions) {
     return shutdownPromise;
   }
 
+  /** Resolves with the port. A port already in use rejects (EADDRINUSE), instead of an 'error' event nobody listens to. */
   function listen(port = 0, host?: string): Promise<number> {
-    return new Promise((resolve) => {
-      server.listen(port, host, () => resolve((server.address() as { port: number }).port));
+    return new Promise((resolve, reject) => {
+      server.once('error', reject);
+      server.listen(port, host, () => {
+        server.off('error', reject);
+        resolve((server.address() as { port: number }).port);
+      });
     });
   }
 
-  return { server, listen, shutdown, stats: () => ({ inFlight, draining }) };
+  return { server, listen, shutdown, stats: () => ({ inFlight, draining: phase !== 'serving' }) };
 }
 
 /** SIGTERM (K8s, Docker, systemd) and SIGINT (Ctrl+C) → graceful shutdown; a second signal forces exit. */

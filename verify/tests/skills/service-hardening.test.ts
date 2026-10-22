@@ -37,7 +37,7 @@ function app(extra: Partial<Parameters<typeof createHardenedServer>[0]> = {}) {
 }
 
 describe('service-hardening', () => {
-  it('graceful shutdown: in-flight requests finish, readiness fails, new work is refused', async () => {
+  it('graceful shutdown: in-flight requests finish, readiness fails, the drain still answers, then the listener closes', async () => {
     const { srv } = app();
     const port = await srv.listen();
     const base = `http://127.0.0.1:${port}`;
@@ -46,7 +46,8 @@ describe('service-hardening', () => {
     const done = srv.shutdown();
     await sleep(20);
     assert.equal((await fetch(`${base}/readyz`)).status, 503, 'readiness flips first');
-    assert.equal((await fetch(`${base}/fast`)).status, 503, 'new work refused while draining');
+    const late = await fetch(`${base}/fast`);
+    assert.deepEqual([late.status, late.headers.get('connection'), await late.text()], [200, 'close', 'fast'], 'what the load balancer still sends is answered');
     assert.deepEqual(await Promise.all(inflight), [[200, 'slow done'], [200, 'slow done'], [200, 'slow done']]);
     assert.deepEqual(await done, { forced: false });
     await assert.rejects(fetch(`${base}/livez`), 'listener closed after shutdown');
@@ -70,7 +71,7 @@ describe('service-hardening', () => {
     const startedAt = performance.now();
     const done = srv.shutdown();
     await sleep(50);
-    assert.equal(endedAt, 0, 'not during the drain delay: its reconnect would come back here, into a 503');
+    assert.equal(endedAt, 0, 'not during the drain delay: its reconnect would come back here, only to be ended again');
     assert.equal(await feed, ': open\n\n');
     assert.ok(endedAt - startedAt >= 95, `ended ${endedAt - startedAt} ms into the shutdown`);
     assert.deepEqual(await done, { forced: false }, 'without waiting out the grace period');

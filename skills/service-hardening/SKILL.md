@@ -14,7 +14,7 @@ High concurrency is rarely the hard part: Node and Go handle 10k sockets on a la
 | Runtime / platform | Ask | K8s: `terminationGracePeriodSeconds` (default 30 s) bounds shutdown. Serverless platforms manage some of this; skip what they own. |
 | Max in-flight per instance | From a load test; start at 256 | Above it → immediate 503 + `Retry-After`. A guess is fine for a first deploy if it's recorded as one. |
 | LB idle timeout | Ask (ALB 60 s, GCLB 600 s, nginx 75 s) | `keepAliveTimeout` must be **greater**, or you get random 502s. |
-| Drain delay | 5 s | Time for the LB/endpoints to stop routing after readiness fails. |
+| Drain delay | 5 s | Time for the LB/endpoints to stop routing after readiness fails. Requests that still arrive are served. |
 | Per-dependency timeouts | Ask per dependency | DB 2–5 s, internal HTTP 1–3 s, LLM 30–120 s (streaming). |
 | Language | Node reference + Go notes | Same checklist; see [references/go.md](references/go.md). |
 
@@ -30,7 +30,9 @@ Start from [references/server.ts](references/server.ts) (node:http; wrap Express
 6. **Body limits**: `readBody(req, maxBytes)` checks `content-length` first, then counts while streaming. Return 413, not an out-of-memory crash. Make sure the client actually *receives* the 413. Out of the box, Node either keeps reading and discarding the rest of the upload so it can reuse the connection, or closes a socket that still has unread upload data. In that case the kernel answers with a reset that wipes out the 413, and the client sees `ECONNRESET` and retries the whole upload. The reference stops reading, sends the 413 with `Connection: close`, ends the socket gracefully and destroys it after `rejectLingerMs` (2 s): the client gets its 413, and the server reads under 8 MB of a 32 MB upload.
 7. **Request ids**: accept a well-formed `x-request-id` or generate one; echo it, log it, put it on spans.
 8. **Graceful shutdown** via `installSignalHandlers(shutdown)`. The steps, in order:
-   1. readiness returns 503, and the server waits `drainDelayMs`;
+   1. readiness returns 503, and the server waits `drainDelayMs`. Requests the load balancer still sends meanwhile
+      are served, each with `Connection: close`, so the client's next request opens a connection that goes to
+      another instance. Answering them 503 would be the very deploy error the delay exists to avoid;
    2. it stops accepting, closes idle keep-alive sockets and ends long-lived responses;
    3. it waits for in-flight requests, up to `shutdownGraceMs`, then force-closes the rest;
    4. it runs the `onShutdown` hooks (DB pools, telemetry flush).
@@ -42,13 +44,17 @@ Start from [references/server.ts](references/server.ts) (node:http; wrap Express
    For SSE that is `openSse(req, res, { closeOn: ctx.shuttingDown })`. Without it, each open stream makes the deploy
    wait out the whole grace period and end forced.
 9. **Config validation at startup**: fail fast on missing env vars, before readiness ever turns green.
+   `createHardenedServer` refuses a NaN or negative setting with a `RangeError`: `Number(process.env.X)` of an
+   unset variable is NaN, and NaN compares false with everything. `maxInFlight: NaN` shed nothing, and a NaN grace
+   period cut every in-flight request the moment a deploy started.
+   `listen()` rejects when the port is taken (`EADDRINUSE`) instead of crashing on an unhandled `'error'` event.
 
 The full go-live list is in [references/checklist.md](references/checklist.md).
 
 ## Verification (required)
 
 [verify/tests/skills/service-hardening.test.ts](../../verify/tests/skills/service-hardening.test.ts):
-- Shutdown during 3 in-flight slow requests → all 3 return 200; `/readyz` returns 503 and new work returns 503 during the drain; the listener is closed afterwards; `forced: false`.
+- Shutdown during 3 in-flight slow requests → all 3 return 200; `/readyz` returns 503 while new work is still answered during the drain, with `Connection: close`; the listener is closed afterwards; `forced: false`.
 - A straggler beyond the grace period → shutdown still completes within the bound (`forced: true`) and the hooks still run.
 - `ctx.shuttingDown` fires after the drain delay, not during it: an open stream ends then, and the shutdown finishes
   without waiting out the grace period (`forced: false`).
@@ -80,3 +86,8 @@ ADR: in-flight cap (with its load-test evidence), timeout values, and shutdown t
 - Retrying 503s without jitter or backoff on the client side, which amplifies overload.
 - Rejecting an oversized upload by destroying the request: the client gets a connection reset instead of a 413, can't tell "too big" from "network blip", and retries the same upload.
 - A `Promise.race` against a bare `setTimeout` for the grace period. The timer outlives the race, and keeps the process alive for the whole grace period after a clean drain. Use `withTimeout`, which clears its timer.
+- Answering 503 during the drain delay. The load balancer keeps sending requests until it notices readiness, and
+  each of them fails: the 5xx-on-every-deploy the delay was meant to prevent. Serve them, and close their
+  connections.
+- `Number(process.env.SHUTDOWN_GRACE_MS)` with the variable unset: NaN, which turned the grace period into
+  "cut everything now". Read settings with a default and check them; the server refuses NaN.

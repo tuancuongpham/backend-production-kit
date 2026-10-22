@@ -104,13 +104,18 @@ export class RateLimiter {
       throw new Error('rate limiter: refillPerSec must be a positive number (for a fixed quota, use a tiny rate and a long-lived key)');
     }
     if (!['open', 'closed', 'local'].includes(o.failureMode)) throw new Error(`rate limiter: unknown failureMode "${o.failureMode}"`);
+    // From an unset environment variable these are NaN. A NaN timeout fails every Redis call at once, so every check
+    // runs in the failure mode: with 'open', no limit at all. A NaN instance count makes the local bucket NaN.
+    const instances = o.instances ?? 1;
+    if (!Number.isInteger(instances) || instances < 1) throw new RangeError(`rate limiter: instances must be a positive integer, got ${instances}`);
+    const timeoutMs = o.timeoutMs ?? 50;
+    if (!(timeoutMs > 0) || !Number.isFinite(timeoutMs)) throw new RangeError(`rate limiter: timeoutMs must be a positive number, got ${timeoutMs}`);
     const now = o.now ?? Date.now;
-    const instances = Math.max(1, o.instances ?? 1);
     this.#redis = o.redis;
     this.#capacity = o.capacity;
     this.#refillPerSec = o.refillPerSec;
     this.#failureMode = o.failureMode;
-    this.#timeoutMs = o.timeoutMs ?? 50;
+    this.#timeoutMs = timeoutMs;
     this.#prefix = o.keyPrefix ?? 'rl';
     this.#onRedisError = o.onRedisError;
     this.#breaker = new CircuitBreaker({ threshold: o.breakerThreshold ?? 5, cooldownMs: o.breakerCooldownMs ?? 5000, now });

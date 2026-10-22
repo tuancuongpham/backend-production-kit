@@ -32,6 +32,7 @@ LLM *token or cost* budgets are a separate concern; see the `llm-gateway` skill.
    - `local` mode keeps a per-instance bucket of `capacity / instances`. That is approximate, but still bounded;
    - keys look like `rl:{subject}`. The hash tag keeps Redis Cluster happy;
    - `createRateLimiter` refuses `capacity` or `refillPerSec` that isn't a positive number. A bucket that never refills makes the script divide by zero, so every call errors and the limiter silently runs in its failure mode;
+   - it also refuses a `timeoutMs` or `instances` that is NaN (an unset environment variable). A NaN timeout failed every Redis call at once, so every check ran in the failure mode: with `'open'`, no limit at all;
    - **capacity**:
      - Redis runs the script in about 9 µs, so one primary can do at most ~100k checks/s across all app instances;
      - one Node instance tops out near 57k checks/s, far above what it serves in HTTP requests;
@@ -66,6 +67,8 @@ ADR: failure mode per endpoint class (with the reason), subject choice, limits p
 - No `Retry-After`: clients retry immediately and amplify the overload.
 - Evicting the local fallback map in insertion order. JavaScript's `Map.set` on an existing key keeps its old position, so the *busiest* subject is the oldest entry and the first to be evicted, coming back with a full bucket during an outage. Delete and re-insert on every access (true LRU).
 - Sending the whole Lua script on every request. Use `EVALSHA` with an `EVAL` fallback on `NOSCRIPT` (after a restart or failover). This saves bandwidth on real networks; on localhost the difference is not measurable.
+- `timeoutMs: Number(process.env.RL_TIMEOUT_MS)` with the variable unset. NaN times out every check at once, the
+  breaker opens, and an `'open'` limiter allows everything while looking configured.
 - A "fixed quota" modelled as a bucket with `refillPerSec: 0`. The script divides by zero, every check errors, and the endpoint runs fail-open or fail-closed while dashboards show Redis as healthy. Use a tiny refill rate on a long-lived key.
 - Limiting login attempts by the email as typed. `Lan@Shop.vn` and `lan@shop.vn` get separate buckets, so a
   credential-stuffing script varies the case to reset its limit. Normalize the subject the way the login lookup

@@ -1,0 +1,56 @@
+{
+  "name": "job-queue",
+  "date": "2026-10-22T06:50:39.466Z",
+  "node": "v24.22.1",
+  "finished": 1000000,
+  "delayed": 100000,
+  "claims": [
+    {
+      "scenario": "nothing due (idle poll)",
+      "design": "A. one table, index on run_at",
+      "p50 ms": 72.919,
+      "p95 ms": 120.212,
+      "plan": "ModifyTable → Nested Loop → Aggregate → Subquery Scan → Limit → LockRows → Sort → Seq Scan → Index Scan (jobs_naive_pkey)"
+    },
+    {
+      "scenario": "nothing due (idle poll)",
+      "design": "B. pending state, partial index (queue, priority, run_at)",
+      "p50 ms": 3.417,
+      "p95 ms": 6.941,
+      "plan": "ModifyTable → Nested Loop → Aggregate → Subquery Scan → Limit → LockRows → Index Scan (jobs_pending_queue_priority_run_at_idx) → Index Scan (jobs_pending_pkey)"
+    },
+    {
+      "scenario": "nothing due (idle poll)",
+      "design": "C. shipped: scheduled → available",
+      "p50 ms": 0.302,
+      "p95 ms": 0.492,
+      "plan": "ModifyTable → Nested Loop → Aggregate → Subquery Scan → Limit → LockRows → Index Scan (jobs_available_idx) → Index Scan (jobs_pkey)"
+    },
+    {
+      "scenario": "10,000 jobs due",
+      "design": "A. one table, index on run_at",
+      "p50 ms": 72.465,
+      "p95 ms": 124.904,
+      "plan": "ModifyTable → Nested Loop → Aggregate → Subquery Scan → Limit → LockRows → Sort → Seq Scan → Index Scan (jobs_naive_pkey)"
+    },
+    {
+      "scenario": "10,000 jobs due",
+      "design": "B. pending state, partial index (queue, priority, run_at)",
+      "p50 ms": 3.547,
+      "p95 ms": 5.425,
+      "plan": "ModifyTable → Nested Loop → Aggregate → Subquery Scan → Limit → LockRows → Index Scan (jobs_pending_queue_priority_run_at_idx) → Index Scan (jobs_pending_pkey)"
+    },
+    {
+      "scenario": "10,000 jobs due",
+      "design": "C. shipped: scheduled → available",
+      "p50 ms": 0.489,
+      "p95 ms": 0.784,
+      "plan": "ModifyTable → Nested Loop → Aggregate → Subquery Scan → Limit → LockRows → Index Scan (jobs_available_idx) → Index Scan (jobs_pkey)"
+    }
+  ],
+  "maintenance": {
+    "p50": 1.023,
+    "p95": 3.167,
+    "mean": 1.275
+  }
+}

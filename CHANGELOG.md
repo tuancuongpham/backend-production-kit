@@ -1,5 +1,19 @@
 # Changelog
 
+## Unreleased
+
+### New skill: `job-queue`
+Background jobs on Postgres. A job is enqueued in the business transaction and claimed with SKIP LOCKED. While it
+runs it is leased, and heartbeats renew the lease. A failing job retries with jittered backoff, then becomes a dead
+letter that `retryDead` can replay. The queue also supports unique jobs, delayed jobs, and recurring jobs that fire
+exactly once across instances; `run()` stops gracefully, and finished jobs are pruned.
+- 12 tests against real Postgres. They cover a worker that dies after claiming (the job runs exactly once more), a
+  worker frozen past its lease (its late result is discarded), a handler that ignores its abort signal, and three
+  scheduler instances ticking at once.
+- Benchmarked three table designs next to 1,000,000 finished jobs and 100,000 delayed ones. An idle poll costs
+  73 ms with an index on `run_at`, 3.4 ms with one `pending` state, and 0.3 ms with the shipped separate
+  `scheduled` and `available` states.
+
 ## 0.3.0 — 2026-10-21
 
 ### New skill: `idempotency-keys`

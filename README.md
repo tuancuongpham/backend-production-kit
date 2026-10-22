@@ -87,6 +87,7 @@ reference code ships the winner ([every table, plan and trade-off](docs/performa
 | Outbox relay | one `UPDATE` per message vs per batch | per batch | 8× throughput |
 | LLM budget reservation | two statements vs one upsert | upsert | 20% lower latency, 37% more throughput |
 | Claiming an idempotency key | check-then-insert vs insert-and-wait vs try-lock + 409 | try-lock + 409 | 20 duplicates: handler runs once, not 20; 0.13 s of pooled connections held, not 4 s |
+| Claiming a background job | index on `run_at` vs one `pending` state vs separate `scheduled` and `available` states | separate states | idle poll 0.3 ms, against 73 ms and 3.4 ms, next to 1M finished and 100k delayed jobs |
 | Tenant transaction (RLS) | 4 round trips vs 3 | 3 | 19% faster per request; RLS itself costs ~0 |
 | Rate limiter client | ioredis defaults vs auto-pipelining | defaults (kept) | auto-pipelining was 11% slower |
 | PII redaction | hints vs no hints vs one combined regex | hints (kept) | 1.3–4.7× faster than the alternatives |
@@ -129,6 +130,7 @@ on its own.
 | [`webhook-ingestion`](skills/webhook-ingestion/SKILL.md) | receive payment or SaaS webhooks (Stripe, VNPay, MoMo, GitHub…) |
 | [`outbox-pattern`](skills/outbox-pattern/SKILL.md) | publish events or start async (AI) work after a database write |
 | [`idempotency-keys`](skills/idempotency-keys/SKILL.md) | accept retried POSTs or agent tool calls without double orders, charges or emails |
+| [`job-queue`](skills/job-queue/SKILL.md) | send emails, run LLM or export work, or schedule recurring jobs in the background |
 | [`rate-limiting`](skills/rate-limiting/SKILL.md) | throttle APIs, logins or LLM endpoints per tenant or user |
 | [`service-hardening`](skills/service-hardening/SKILL.md) | ship an API to Docker/Kubernetes without deploy-time 502s or hangs |
 | [`llm-gateway`](skills/llm-gateway/SKILL.md) | control LLM cost, add caching or fall back when a provider fails |

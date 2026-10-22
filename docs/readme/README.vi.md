@@ -87,6 +87,7 @@ dùng phương án thắng ([toàn bộ bảng số, query plan và đánh đổ
 | Relay outbox | `UPDATE` từng message, `UPDATE` theo lô | theo lô | thông lượng gấp 8 lần |
 | Giữ chỗ ngân sách LLM | hai câu lệnh, một câu upsert | upsert | độ trễ giảm 20%, thông lượng tăng 37% |
 | Claim idempotency key | kiểm tra rồi insert, insert rồi chờ, try-lock + 409 | try-lock + 409 | 20 request trùng: handler chạy 1 lần thay vì 20; giữ kết nối pool 0,13 giây thay vì 4 giây |
+| Claim job nền | index trên `run_at`, một trạng thái `pending`, tách `scheduled` và `available` | tách trạng thái | poll lúc rảnh 0,3 ms, so với 73 ms và 3,4 ms, khi có 1 triệu job đã xong và 100 nghìn job hẹn giờ |
 | Transaction theo tenant (RLS) | 4 round trip, 3 round trip | 3 | mỗi request nhanh hơn 19%; bản thân RLS gần như không tốn gì |
 | Client của rate limiter | mặc định của ioredis, auto-pipelining | mặc định (giữ nguyên) | auto-pipelining chậm hơn 11% |
 | Che PII | có hint, không hint, một regex gộp | có hint (giữ nguyên) | nhanh hơn 1,3–4,7 lần so với các phương án khác |
@@ -123,6 +124,7 @@ theo khách"); skill phù hợp sẽ tự được nạp.
 | [`webhook-ingestion`](../../skills/webhook-ingestion/SKILL.md) | nhận webhook thanh toán hoặc SaaS (Stripe, VNPay, MoMo, GitHub…) |
 | [`outbox-pattern`](../../skills/outbox-pattern/SKILL.md) | phát event hoặc chạy tác vụ (AI) bất đồng bộ sau khi ghi DB |
 | [`idempotency-keys`](../../skills/idempotency-keys/SKILL.md) | nhận POST bị gửi lại hoặc tool call của agent bị retry mà không trùng đơn, trùng tiền, trùng email |
+| [`job-queue`](../../skills/job-queue/SKILL.md) | gửi email, chạy tác vụ LLM hay export, hoặc lên lịch job định kỳ ở chế độ nền |
 | [`rate-limiting`](../../skills/rate-limiting/SKILL.md) | giới hạn request API, đăng nhập, endpoint LLM theo tenant hoặc user |
 | [`service-hardening`](../../skills/service-hardening/SKILL.md) | đưa API lên Docker/Kubernetes mà không bị 502 hay treo khi deploy |
 | [`llm-gateway`](../../skills/llm-gateway/SKILL.md) | kiểm soát chi phí LLM, thêm cache, chuyển model dự phòng khi provider lỗi |

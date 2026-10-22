@@ -141,6 +141,29 @@ For comparison, one loop with batch 50 drains 200 uniform events in 1,542 ms at 
 **Shipped:** `worker.run({ loops, signal })`. It runs independent loops, and stopping waits for the claimed rows, so
 a deploy no longer strands rows in `processing` for `stuckAfterSec`.
 
+### Claiming a job · `job-queue`
+
+Three table designs for a job queue ([`job-queue.ts`](../bench/compare/job-queue.ts)). Each table holds 1,000,000
+finished jobs and 100,000 reminders scheduled for tomorrow. The timing covers only the claim statement, which takes
+10 jobs:
+
+| Scenario | A. one table, index on `run_at` | B. one `pending` state, partial index on (queue, priority, run_at) | C. shipped: `scheduled` → `available` |
+|---|---|---|---|
+| Nothing due (an idle poll) | 72.9 ms | 3.42 ms | **0.30 ms** |
+| 10,000 jobs due | 72.5 ms | 3.55 ms | **0.49 ms** |
+
+- **A** can't skip history. `run_at <= now()` matches every finished job, so Postgres reads the whole table and
+  sorts (`Sort → Seq Scan`) on every claim and every idle poll. That repeats from every loop, every second, and
+  grows with the table.
+- **B** keeps history out of the index, but due and delayed jobs share it. To find a due job, or to learn that
+  there is none, the claim walks past every delayed job at a better priority: here all 100,000 reminders.
+- **C** gives delayed jobs and retries their own state. The claim index holds only due jobs, in claim order, so
+  the claim reads 10 index entries whatever else is in the table.
+- C pays for promotion and lease rescue with `maintain()`, two statements that cost 1.0 ms (p95 3.2 ms) when there
+  is nothing to do. The worker runs it about once a second per instance.
+
+**Shipped:** C.
+
 ### Outbox relay · `outbox-pattern`
 
 The relay marks each published message. The run publishes 5,000 messages to an instant in-memory broker, which

@@ -7,7 +7,7 @@ against real Postgres or Redis, like every skill here), and how much it reuses w
 | # | Skill | The production bug it prevents | Builds on | Effort |
 |---|---|---|---|---|
 | 1 | [`idempotency-keys`](../skills/idempotency-keys/SKILL.md) (**built in 0.3.0**) | A client or an agent retries a POST after a timeout, and the order, charge or email happens twice | webhook-ingestion, outbox-pattern | done |
-| 2 | `job-queue` | Background jobs lost on restart, run twice, or stuck behind one slow job | webhook-ingestion's worker, outbox-pattern | 2–3 days |
+| 2 | [`job-queue`](../skills/job-queue/SKILL.md) (**built**) | Background jobs lost on restart, run twice, or stuck behind one slow job | webhook-ingestion's worker, outbox-pattern | done |
 | 3 | `zero-downtime-migrations` | A migration takes a table lock and every request queues behind it | every skill (they all ship SQL) | 2–3 days |
 | 4 | `llm-tool-safety` | An instruction hidden in a retrieved document makes the agent call a write tool | agent-safe-db, llm-gateway, llm-observability | 2–3 days |
 | 5 | `cache-stampede` | A hot key expires and hundreds of requests hit the database or the LLM at once | llm-gateway, rate-limiting, outbox-pattern | 1–2 days |
@@ -25,18 +25,18 @@ consumers (`processed_messages`). See [the skill](../skills/idempotency-keys/SKI
 Building it surfaced a kit-wide bug. Every reference function that holds a pooled connection crashed the Node
 process when Postgres ended that connection between two queries. All of them are fixed and tested in 0.3.0.
 
-## 2. job-queue
+## 2. job-queue: built
 
-Durable background jobs in Postgres: delays, priorities, retries with backoff, dead letters, cron. The webhook
-worker already contains most of it, including the measured parts: a claim that stays O(batch) as the backlog
-grows, independent loops instead of a batch barrier, graceful stop (see [performance](performance.md)). The skill
-generalizes that worker and adds scheduling: one advisory-lock holder fires each cron tick across instances.
-Enqueueing goes through the outbox when a job must exist only if the business transaction commits.
+See [the skill](../skills/job-queue/SKILL.md) and its [benchmark](performance.md#claiming-a-job--job-queue). It
+grew from the webhook worker: independent loops, graceful stop, and a claim that only touches what it claims. It
+adds what a general queue needs:
+- leases renewed by heartbeats, so a crashed worker's jobs come back and a long job's don't;
+- delayed and recurring jobs;
+- unique jobs;
+- enqueueing in the business transaction.
 
-Proof: a job whose worker dies is re-run exactly once; a delayed job never runs early; a cron tick fires once
-across three instances; claim latency stays flat with a million finished jobs; stopping leaves nothing in
-`running`. It should also say when to use an existing library instead: pg-boss or graphile-worker in Node, River
-in Go, Oban in Elixir, and Temporal or Inngest when a workflow's steps must survive for days.
+Measuring the designs showed that delayed jobs need their own state. Sharing one `pending` state with due jobs
+makes every poll walk past all of them.
 
 ## 3. zero-downtime-migrations
 

@@ -74,6 +74,8 @@ SLO (objective, error ratio as PromQL)
   - 5 minutes after the fix the 1-hour page resolves, and 30 minutes after it the 6-hour page does;
   - the ticket stays open for the follow-up;
   - a healthy hour fires nothing.
+- Two SLOs sharing a name are refused before a rule file is written
+  ([regressions/round-6.test.ts](../../verify/tests/regressions/round-6.test.ts)).
 
 How to write these tests so they prove something:
 - Test the rules where they run. A unit test of your own burn-rate arithmetic doesn't prove the PromQL is right;

@@ -87,6 +87,10 @@ LLM APIs are the most expensive and least reliable dependency most apps have. Th
 - **Breaker half-open**: after the cooldown, 10 waiting requests send 1 probe to the dead provider, not 10. A fallback answer cached during an outage is gone 10 minutes later. An already cancelled request never reaches a provider.
 - **Postgres stores**: TTL expiry, similarity threshold, scope isolation.
 - **Many tenants, same question** ([regressions/round-2.test.ts](../../verify/tests/regressions/round-2.test.ts)): 100 tenants cache a popular question, and this tenant's own entry is still found with an HNSW index present. `pruneLlmCache` removes only expired rows.
+- [regressions/round-6.test.ts](../../verify/tests/regressions/round-6.test.ts):
+  - a monthly limit of NaN refuses the call without calling the model, with the memory and the Postgres budget;
+  - answers without token counts are booked at the estimate: the next call succeeds, and `spent_usd` stays a number;
+  - a semantic hit doesn't carry the question another user asked.
 
 When writing your own tests: make the concurrency test real (requests in flight together, e.g. a provider that sleeps), and inject a failing usage sink. Code inspection alone doesn't prove either property.
 

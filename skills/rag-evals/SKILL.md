@@ -81,6 +81,8 @@ golden set (real queries → relevant chunk ids, tagged by type)
 - [regressions/round-3.test.ts](../../verify/tests/regressions/round-3.test.ts): a retriever returning one document
   twice scores recall 1, not 2; adding a hard question to the golden set passes the gate; an answer containing
   `$&`, `$'` or `{{context}}` reaches the judge prompt as written.
+- [regressions/round-6.test.ts](../../verify/tests/regressions/round-6.test.ts): a gate threshold of NaN throws
+  instead of passing a regression.
 
 How to write these tests so they prove something:
 - Feed the gate a realistic broken retriever (a removed normalization, a smaller candidate pool, another model) and

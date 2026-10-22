@@ -86,6 +86,8 @@ Against real Postgres and Redis. [verify/tests/skills/data-retention-and-erasure
   - two instances processing the same request at once can't reopen it with the subject already forgotten;
   - `processPending` reports the requests it completed correctly when more than one batch is open;
   - an `anonymize` entry that leaves `shipping_address` in place is refused at startup.
+- [regressions/round-6.test.ts](../../verify/tests/regressions/round-6.test.ts): a store that never answers is timed
+  out, so `requestErasure` and `processPending` return with it still pending.
 
 How to write these tests so they prove something:
 - Prove absence by searching **every** text-like column for the person's identifiers, not only the tables you

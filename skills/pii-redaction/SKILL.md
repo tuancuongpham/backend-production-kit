@@ -54,6 +54,11 @@ Use two mechanisms together:
 [verify/tests/skills/pii-redaction.test.ts](../../verify/tests/skills/pii-redaction.test.ts) is the template:
 - Every fixture in "redacts" becomes its placeholder; every fixture in "keeps" is unchanged (Luhn and digit-boundary guards work).
 - Sensitive keys are replaced at any depth; arrays, `Error` objects (message **and** stack), cycles and deep nesting are handled without throwing; input objects are not mutated.
+- [regressions/round-6.test.ts](../../verify/tests/regressions/round-6.test.ts):
+  - secrets under camelCase, prefixed and header-style names are redacted; token counts and cache keys are kept;
+  - a value with `toJSON` is redacted as the logger would print it: a `URL` with credentials becomes
+    `postgres://[URL_CREDENTIALS]@db…`, not `{}`;
+  - `maxStringLength` or `maxDepth` of NaN is refused when the redactor is created.
 - Logging never throws:
   - an ORM entity whose lazy relation throws when read gets `[UNREADABLE]` for that property only;
   - a proxy, a `Map` with object keys, or a library error with a non-string message is handled the same way.

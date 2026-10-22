@@ -67,6 +67,8 @@ Against real Postgres. [verify/tests/skills/webhook-ingestion.test.ts](../../ver
 - A handler slower than `stuckAfterSec` while a second worker polls → credited once, not twice. A worker whose connection died after another worker took over the event → `lost`, and the event stays `done` ([regressions/round-3.test.ts](../../verify/tests/regressions/round-3.test.ts)).
 - `run()` with 4 loops processes 4 events at once; aborting it mid-batch leaves no row in `processing`, and a restart drains the rest with each event applied once.
 - Reconciliation ingests only missing events and reports the count. `pruneInbox` deletes old `done` rows only, never recent ones or dead letters.
+- A `toleranceSec` of NaN throws instead of accepting a year-old signature, and NaN retry delays are refused at
+  startup ([regressions/round-6.test.ts](../../verify/tests/regressions/round-6.test.ts)).
 
 How to write these tests so they prove something:
 - **Sign test payloads with the provider's own tooling**: Stripe's `stripe.webhooks.generateTestHeaderString`, or a payload and signature captured from the provider's sandbox. A test that signs with the same HMAC code the verifier uses passes even when both share a bug (wrong field order, wrong encoding).

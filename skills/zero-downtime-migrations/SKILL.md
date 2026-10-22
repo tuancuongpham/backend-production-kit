@@ -80,6 +80,9 @@ Against real Postgres. [verify/tests/skills/zero-downtime-migrations.test.ts](..
 - The linter flags each hazard in a fixture migration and leaves the safe statements alone.
 - A batch that hits a deadlock is retried, and all 2,500 rows are backfilled; `ADD COLUMN … NOT NULL` without a
   default is flagged, with a default it isn't ([regressions/round-3.test.ts](../../verify/tests/regressions/round-3.test.ts)).
+- [regressions/round-6.test.ts](../../verify/tests/regressions/round-6.test.ts): an unnamed concurrent unique index
+  that fails leaves no INVALID index; a quoted identifier with a `;` stays in its statement; `TRUNCATE` is flagged;
+  NaN attempts and retries and `batchSize: 0` are `RangeError`s.
 
 How to write these tests so they prove something:
 - Hold a lock from a second connection (an open transaction) and time a third query. A migration that runs fine on

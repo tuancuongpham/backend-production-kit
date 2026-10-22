@@ -72,6 +72,9 @@ The full go-live list is in [references/checklist.md](references/checklist.md).
 - Handler throws → 500, the server keeps serving; oversize body → 413; malformed incoming request ids are replaced.
 - A 32 MB upload, chunked or with a declared `Content-Length`, gets a 413 response (not a reset), and the server reads less than 8 MB of it ([regressions/round-2.test.ts](../../verify/tests/regressions/round-2.test.ts)).
 - Readiness follows dependency checks while liveness doesn't.
+- [regressions/round-6.test.ts](../../verify/tests/regressions/round-6.test.ts): a request arriving during the drain
+  delay gets 200 and `Connection: close`, not a 503; a NaN `maxInFlight`, `drainDelayMs` or `shutdownGraceMs` is
+  refused at startup; `listen()` on a taken port rejects with `EADDRINUSE`.
 
 Then **load-test** the real service (k6/autocannon) at 2× expected peak. Record p50/p95/p99, error rate and the in-flight cap where shedding starts; the `adr-writer` benchmark template has the format. Finally, do a rolling deploy under load and confirm zero 5xx caused by the deploy.
 

@@ -83,6 +83,9 @@ Against real Redis. [verify/tests/skills/cache-stampede.test.ts](../../verify/te
 - [regressions/round-3.test.ts](../../verify/tests/regressions/round-3.test.ts): a hit deep-equals the miss that filled
   it (a `Date` field included); a `BigInt` value is served uncached; 20 requests against a black-holed Redis take
   181 ms in total, against 1,236 ms without the breaker.
+- [regressions/round-6.test.ts](../../verify/tests/regressions/round-6.test.ts): a fill, and a background refresh,
+  that read the old row before the commit and finish after `invalidate()` don't overwrite it; the next read loads the
+  new row.
 
 How to write these tests so they prove something:
 - Fire the requests concurrently against an origin that takes long enough to overlap them, and count origin calls.

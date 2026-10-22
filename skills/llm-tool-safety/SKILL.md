@@ -110,6 +110,8 @@ Against real Postgres. [verify/tests/skills/llm-tool-safety.test.ts](../../verif
   - a result holding a BigInt is stored and replayed (as a string);
   - a pattern with the `m` flag still matches the whole value, not one line of it;
   - a tool-call id longer than an index entry still gets its result.
+- [regressions/round-6.test.ts](../../verify/tests/regressions/round-6.test.ts): an approved refund whose run failed
+  (the payment API answered 503) succeeds on retry with the same approval, and runs once more only.
 - [The agent approval journey](../../verify/tests/journeys/agent-approvals.test.ts) runs over HTTP, as the agent
   runtime and the approval page call it:
   - an email with an injected instruction, then a refund held for a human;

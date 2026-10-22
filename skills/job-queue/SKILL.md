@@ -110,6 +110,9 @@ Against real Postgres. [verify/tests/skills/job-queue.test.ts](../../verify/test
   `attempts` 0 ([regressions/round-3.test.ts](../../verify/tests/regressions/round-3.test.ts)).
 - `pruneJobs` deletes old finished jobs in batches and keeps dead and recent ones; `job_queue_stats` reports depth
   and the oldest wait.
+- [regressions/round-6.test.ts](../../verify/tests/regressions/round-6.test.ts): one schedule returning an Invalid
+  Date and another whose `next()` throws are reported while the third still fires; NaN worker settings and a
+  priority outside smallint are `RangeError`s.
 
 How to write these tests so they prove something:
 - Simulate a dead worker by claiming without ever heartbeating, and a frozen one by expiring a live worker's lease.

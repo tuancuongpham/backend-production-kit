@@ -151,6 +151,8 @@ describe('resilience-testing', () => {
 
     const pool = new pg.Pool({ connectionString: proxiedUrl, max: 2, connectionTimeoutMillis: 1000 });
     pool.on('error', () => {});
+    let relayConnection: pg.PoolClient | undefined;
+    pool.on('acquire', (client) => (relayConnection = client));
     closers.push(() => pool.end());
     const sent: string[] = [];
     let cut = true;
@@ -160,7 +162,12 @@ describe('resilience-testing', () => {
         sent.push(m.id);
         if (cut) {
           cut = false;
-          await pgProxy.down(); // the database goes away after the first publish
+          // The database goes away after the first publish. The relay can only stop for a drop it has seen, and
+          // Toxiproxy's API may answer before the relay's socket gets the close, so wait until the connection
+          // has noticed. Without this the test raced two network events (it once saw 6 sends on CI).
+          const noticed = new Promise((resolve) => relayConnection!.once('end', resolve));
+          await pgProxy.down();
+          await Promise.race([noticed, sleep(2000)]);
         }
       },
     });
@@ -168,6 +175,6 @@ describe('resilience-testing', () => {
     await pgProxy.up();
     assert.equal(await relay.relayOnce(), 3);
     assert.equal(new Set(sent).size, 3, 'every message was published');
-    assert.equal(sent.length, 4, 'the relay stopped when its connection died: only the first went out twice (consumers dedup by id)');
+    assert.equal(sent.length, 4, 'once its connection noticed the drop, the relay stopped: only the first went out twice (consumers dedup by id)');
   });
 });

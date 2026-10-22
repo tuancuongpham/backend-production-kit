@@ -62,13 +62,17 @@ reference code through Toxiproxy:
 - **Redis slower than the rate limiter's 50 ms timeout.** It fell back to the local bucket in under 150 ms, and
   returned to Redis once latency went away.
 - **Redis down.** The cache served from the origin, called it once, and reported the outage.
-- **Postgres gone mid-outbox-relay.** Nothing was lost. The relay stopped publishing as soon as its connection
-  died, so only the message in flight went out twice.
+- **Postgres gone mid-outbox-relay.** Nothing was lost. Once its connection noticed the drop, the relay stopped
+  publishing, so only the message in flight went out twice. A drop the client hasn't seen yet can't stop it: those
+  publishes go out again on the next run, and consumers dedup.
 
 How to write these tests so they prove something:
 - Connect before injecting a fault that should hit established connections, and inject it before connecting for
   faults that should hit new ones. These are different failures.
 - Assert time bounds. "It eventually failed" is exactly the hang the test is there to catch.
+- Wait for states, not durations. Toxiproxy's API can answer before the app's socket has seen the close, so before
+  asserting what happens after a drop, wait until the client noticed it (pg's `end` event). The outbox test raced
+  those two events and once failed on CI.
 
 ## Record the decision
 ADR: dependencies covered, expected behaviour per fault, timeouts chosen (with the test that proves them), where

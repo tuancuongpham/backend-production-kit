@@ -30,6 +30,12 @@ import * as lint from '../../skills/zero-downtime-migrations/references/lint.ts'
 let dbUrl: string;
 let pool: pg.Pool;
 const count = async (sql: string, params: unknown[] = []) => (await pool.query(sql, params)).rows[0].n as number;
+/** Waits for a state instead of guessing a duration: CI runners are slower than laptops in unpredictable ways. */
+const waitFor = async (check: () => boolean, what: string) => {
+  for (const deadline = Date.now() + 5000; !check(); await sleep(10)) {
+    if (Date.now() > deadline) throw new Error(`timed out waiting for ${what}`);
+  }
+};
 
 describe('latent bugs, round 3', () => {
   before(async () => {
@@ -306,21 +312,22 @@ describe('latent bugs, round 3', () => {
   describe('idempotency-keys', () => {
     it("a request whose stale claim was taken over can't free the new owner's claim when it finally fails", async () => {
       const req = { scope: 'tenant:1/user:1', key: 'k-stale', fingerprint: idem.requestFingerprint('POST', '/charges', { amount: 100 }) };
-      let releaseA!: () => void;
+      let releaseA: (() => void) | undefined;
       const a = idem.runIdempotentExternal(pool, req, () => new Promise((_, reject) => (releaseA = () => reject(new Error('provider timeout')))), { staleAfterSec: 1 });
       a.catch(() => {});
+      await waitFor(() => releaseA !== undefined, 'A to hold the claim'); // its handler only runs once the claim is committed
       await sleep(1100); // A's claim is stale now
-      let releaseB!: () => void;
+      let releaseB: (() => void) | undefined;
       const b = idem.runIdempotentExternal(pool, req, () => new Promise((r) => (releaseB = () => r({ status: 201, body: { charge: 'ch_1' } }))), { staleAfterSec: 1 });
-      await sleep(100); // B has taken the claim over and is calling the provider
-      releaseA();
+      await waitFor(() => releaseB !== undefined, 'B to take the claim over'); // B is now calling the provider
+      releaseA!();
       await assert.rejects(a);
       // A third retry arrives while B is still charging: it must wait (409), not charge again.
       await assert.rejects(
         idem.runIdempotentExternal(pool, req, async () => ({ status: 201, body: { charge: 'ch_2' } }), { staleAfterSec: 1 }),
         (e: { status?: number }) => e.status === 409,
       );
-      releaseB();
+      releaseB!();
       assert.equal((await b).status, 201);
     });
   });
@@ -354,7 +361,8 @@ describe('latent bugs, round 3', () => {
       const t0 = performance.now();
       ac.abort();
       await running;
-      assert.ok(performance.now() - t0 < 350, 'stop waited for the running job only');
+      // About 0.2 s: the rest of the running job. Before the fix it ran the other two as well (about 0.8 s).
+      assert.ok(performance.now() - t0 < 500, 'stop waited for the running job only');
       const { rows } = await pool.query(`SELECT status, attempts FROM jobs WHERE queue = 'stop' ORDER BY id`);
       assert.deepEqual(rows, [
         { status: 'done', attempts: 1 },

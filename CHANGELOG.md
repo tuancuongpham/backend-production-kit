@@ -60,6 +60,10 @@ backslash or a quote.
   final error carries `lastId`. The linter now flags `ADD COLUMN … NOT NULL` without a default.
 - Found while refactoring: `adr-writer`'s `new-adr.mjs` filled its template with `replaceAll`, so a title with `$&`
   came out garbled.
+- Tests: the outbox resilience test raced two network events, Toxiproxy's API answer and the relay socket's close,
+  and once saw 6 sends instead of 4 on CI. The relay can only stop for a drop it has seen. The test now waits until
+  the connection noticed, and the docs say "once it notices" instead of "as soon as the connection dies". The
+  round-3 idempotency test waits for each claim instead of sleeping a guessed 100 ms.
 
 ### Changed — architecture
 - Stateful components are classes behind the same `createX()` factories: `OutboxRelay`, `InboxWorker`, `JobWorker`,

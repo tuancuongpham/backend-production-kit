@@ -45,7 +45,7 @@ replay CLI → dead → pending          reconcile cron → provider API → ing
    - **Graceful stop.** On SIGTERM, abort `signal` and `await` the returned promise in the shutdown hook (`service-hardening`). The loops finish the rows they claimed instead of leaving them in `processing` until `stuckAfterSec`.
    - **Several instances are safe** thanks to `SKIP LOCKED`. Rows stuck in `processing` after a crash are re-claimed after `stuckAfterSec`.
    - **A slow handler is never run twice at once.** Every claim gets a new `lease_id`, and the handler's transaction starts by locking its own row as that lease holder (`SELECT … FOR UPDATE`). While the lock is held, the claim's `SKIP LOCKED` passes over the row even after `stuckAfterSec`. A worker that lost its row meanwhile gets the outcome `lost` and can't overwrite the new owner's result. That costs one round trip per event.
-   - Copy `pg-transaction.ts` and `worker-loop.ts` along with `webhooks.ts`: they are the kit's shared building blocks, identical in every skill that has them.
+   - Copy `hooks.ts`, `pg-transaction.ts`, `pg-values.ts` and `worker-loop.ts` along with `webhooks.ts`: they are the kit's shared building blocks, identical in every skill that has them. `pg-values.ts` stores a NUL or half an emoji in a payload as U+FFFD. Without it, Postgres refuses the event and the provider retries it forever.
    - **The claim stays cheap under a backlog.** It takes stuck rows, then due rows, each through its own partial index in order: about 0.6 ms with 200,000 events due.
    - `processOnce()` is the single tick underneath, for tests and custom schedulers. Optionally wake the loops with `LISTEN/NOTIFY`; keep polling (`idleMs`) as the fallback.
 5. **DLQ + replay.** The `webhook_dead_letters` view feeds a dashboard or alert. Wrap `replay()` in a CLI or admin endpoint, by ids, provider or type, so it can be used after a fix ships. Ship it as code; a SQL snippet in the README is not a replay tool at 3 a.m.
@@ -86,3 +86,8 @@ ADR: inbox-in-Postgres vs broker, retry policy, ordering strategy, reconciliatio
 - Stopping workers without waiting for them: every deploy strands the claimed rows in `processing` for `stuckAfterSec`.
 - Deleting processed rows sooner than the provider's retry window: a late redelivery is no longer recognized as a duplicate.
 - Re-claiming "stuck" rows by age alone. A handler that is merely slow gets a second run alongside the first, both commit, and the payment is credited twice. Only the holder of the current claim may finish a row.
+- Comparing signatures with `Buffer.from(sig, 'hex')` alone. It stops at the first character that isn't hex, so a
+  valid signature with anything appended (`…0`, `…z`) still compares equal. Check that it is whole hex first.
+- An `onDead` alert that throws, or an async one that rejects while Slack is down. Called bare, it turns a recorded
+  dead letter into an exception, or an unhandled rejection that ends the process. The kit calls every hook through
+  `callHook` (`hooks.ts`): the dead letter stands whatever the alert does.

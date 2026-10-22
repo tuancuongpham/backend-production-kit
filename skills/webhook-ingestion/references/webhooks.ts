@@ -2,20 +2,28 @@
 import { createHmac, timingSafeEqual } from 'node:crypto';
 import type pg from 'pg';
 import { withTransaction } from './pg-transaction.ts';
+import { callHook } from './hooks.ts';
+import { pgJson, pgText } from './pg-values.ts';
 import { runLoops } from './worker-loop.ts';
 
 // ---------- 1. Signature verification (on the RAW body, before JSON.parse) ----------
 
+const HEX = /^(?:[0-9a-f]{2})+$/i;
+
+/**
+ * Compares two hex digests in constant time. Both must be whole hex: Buffer.from(s, 'hex') stops at the first
+ * character that isn't, so a valid signature with anything appended ("…0", "…z") would otherwise compare equal.
+ */
 function safeEqualHex(a: string, b: string): boolean {
-  const ba = Buffer.from(a, 'hex');
-  const bb = Buffer.from(b, 'hex');
-  return ba.length === bb.length && ba.length > 0 && timingSafeEqual(ba, bb);
+  if (!HEX.test(a) || !HEX.test(b) || a.length !== b.length) return false;
+  return timingSafeEqual(Buffer.from(a, 'hex'), Buffer.from(b, 'hex'));
 }
 
 /** Generic HMAC check (VNPay/MoMo/GitHub style): signature = hex(HMAC(secret, data)). */
 export function verifyHmacHex(secret: string, data: string | Buffer, signatureHex: string, algo: 'sha256' | 'sha512' = 'sha256'): boolean {
   const expected = createHmac(algo, secret).update(data).digest('hex');
-  return safeEqualHex(expected, signatureHex.trim().toLowerCase());
+  // A header sent twice arrives as an array: not a signature.
+  return typeof signatureHex === 'string' && safeEqualHex(expected, signatureHex.trim().toLowerCase());
 }
 
 /**
@@ -49,14 +57,18 @@ export interface InboundEvent {
   payload: unknown;
 }
 
-/** Returns inserted=false for duplicates. Respond 2xx either way — the provider only needs to stop retrying. */
+/**
+ * Returns inserted=false for duplicates. Respond 2xx either way — the provider only needs to stop retrying.
+ * A NUL character anywhere in the event is stored as U+FFFD: Postgres can't hold it, and refusing the event would
+ * only make the provider retry it forever.
+ */
 export async function ingest(db: pg.Pool | pg.PoolClient, e: InboundEvent, source: 'webhook' | 'reconcile' = 'webhook') {
   const res = await db.query(
     `INSERT INTO webhook_inbox (provider, event_id, event_type, payload, source)
      VALUES ($1, $2, $3, $4, $5)
      ON CONFLICT (provider, event_id) DO NOTHING
      RETURNING id`,
-    [e.provider, e.eventId, e.eventType, JSON.stringify(e.payload), source],
+    [pgText(e.provider), pgText(e.eventId), pgText(e.eventType), pgJson(e.payload), source],
   );
   return { inserted: res.rowCount === 1, id: res.rows[0]?.id as string | undefined };
 }
@@ -96,7 +108,7 @@ export interface WorkerOptions {
    */
   stuckAfterSec?: number;
   random?: () => number; // injectable for tests
-  onDead?: (row: InboxRow, error: unknown) => void; // alert here
+  onDead?: (row: InboxRow, error: unknown) => unknown; // alert here
   /**
    * Rows of one claimed batch processed in parallel (each in its own transaction). Default 1.
    * Handlers are I/O-bound (DB writes, provider API calls), so 4–8 cuts drain time several-fold.
@@ -117,7 +129,7 @@ export interface RunOptions {
   /** Abort to stop. run() resolves once every loop has finished the rows it already claimed. */
   signal: AbortSignal;
   /** Claim failures (database unreachable…). The loop backs off for idleMs and keeps going. */
-  onError?: (err: unknown) => void;
+  onError?: (err: unknown) => unknown;
 }
 
 /** Exponential backoff with "equal jitter": never ~0, never synchronized across rows. */
@@ -150,7 +162,7 @@ export class InboxWorker {
   readonly #baseDelayMs: number;
   readonly #maxDelayMs: number;
   readonly #random: () => number;
-  readonly #onDead?: (row: InboxRow, error: unknown) => void;
+  readonly #onDead?: (row: InboxRow, error: unknown) => unknown;
 
   constructor(o: WorkerOptions) {
     this.#pool = o.pool;
@@ -261,12 +273,12 @@ export class InboxWorker {
         row.id,
         row.lease_id,
         dead ? 'dead' : 'pending',
-        String(err instanceof Error ? err.message : err).slice(0, 2000),
+        pgText(String(err instanceof Error ? err.message : err).slice(0, 2000)),
         backoffMs(row.attempts, this.#baseDelayMs, this.#maxDelayMs, this.#random),
       ],
     );
     if (res.rowCount === 0) return 'lost';
-    if (dead) this.#onDead?.(row, err);
+    if (dead) callHook(this.#onDead, row, err); // an alert that fails can't undo the dead letter
     return dead ? 'dead' : 'retry';
   }
 }

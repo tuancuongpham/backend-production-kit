@@ -1,0 +1,15 @@
+# Text files are stored and checked out with LF on every platform, whatever core.autocrlf says: the tests compare
+# bytes (signatures, event streams), and a CRLF checkout on Windows would change what they see.
+* text=auto eol=lf
+
+# Windows scripts keep their own line endings.
+*.bat text eol=crlf
+*.cmd text eol=crlf
+*.ps1 text eol=crlf
+
+*.png binary
+*.jpg binary
+*.gif binary
+*.ico binary
+*.zip binary
+*.skill binary

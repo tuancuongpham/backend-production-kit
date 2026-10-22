@@ -1,0 +1,71 @@
+{
+  "name": "outbox-prune",
+  "date": "2026-10-22T19:48:48.703Z",
+  "node": "v24.22.1",
+  "rows": [
+    {
+      "variant": "A. one DELETE (shipped)",
+      "deleted": 60000,
+      "statements": 1,
+      "ms total": 98,
+      "longest statement ms": 98
+    },
+    {
+      "variant": "B. batches of 5,000",
+      "deleted": 60000,
+      "statements": 13,
+      "ms total": 1142,
+      "longest statement ms": 123
+    },
+    {
+      "variant": "C. batches of 5,000 through an index on published_at",
+      "deleted": 60000,
+      "statements": 13,
+      "ms total": 1250,
+      "longest statement ms": 125
+    }
+  ],
+  "shippedDeleted": 60000,
+  "relay": [
+    {
+      "round": 0,
+      "relay": "shipped (no such index)",
+      "messages/s": 22740
+    },
+    {
+      "round": 0,
+      "relay": "with an index on published_at",
+      "messages/s": 25049
+    },
+    {
+      "round": 1,
+      "relay": "shipped (no such index)",
+      "messages/s": 26229
+    },
+    {
+      "round": 1,
+      "relay": "with an index on published_at",
+      "messages/s": 28130
+    },
+    {
+      "round": 2,
+      "relay": "shipped (no such index)",
+      "messages/s": 29546
+    },
+    {
+      "round": 2,
+      "relay": "with an index on published_at",
+      "messages/s": 27705
+    }
+  ],
+  "relaySummary": [
+    {
+      "relay": "shipped (no such index)",
+      "messages/s, median of 3": 26229
+    },
+    {
+      "relay": "with an index on published_at",
+      "messages/s, median of 3": 27705
+    }
+  ]
+}

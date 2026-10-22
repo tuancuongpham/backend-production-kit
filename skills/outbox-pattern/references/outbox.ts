@@ -159,7 +159,11 @@ export function consumeOnce(
   });
 }
 
-/** Housekeeping: published rows are only needed for debugging/replay for a while. */
+/**
+ * Housekeeping: published rows are only needed for debugging/replay for a while. One DELETE on purpose: batches
+ * through an index on published_at were measured 11× slower for a day of traffic, with no shorter statement, and the
+ * index slowed every publish (docs/performance.md).
+ */
 export async function pruneOutbox(pool: pg.Pool, olderThanDays = 7) {
   const res = await pool.query(
     `DELETE FROM outbox WHERE published_at < now() - make_interval(days => $1)`,

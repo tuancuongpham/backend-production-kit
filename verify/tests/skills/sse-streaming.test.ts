@@ -1,7 +1,9 @@
 import { after, before, describe, it } from 'node:test';
 import assert from 'node:assert/strict';
+import { getEventListeners } from 'node:events';
 import http from 'node:http';
-import { sleep } from '../support/wait.ts';
+import type { AddressInfo } from 'node:net';
+import { sleep, waitFor } from '../support/wait.ts';
 import { createReplayBuffer, openSse, serveFeed, streamTokens } from '../../../skills/sse-streaming/references/sse.ts';
 
 let server: http.Server;
@@ -135,6 +137,23 @@ describe('sse-streaming', () => {
     feed.append({ orders: 99 }, 'stats');
     const { events } = await pending;
     assert.ok(events.some((e) => e.comment === 'ping'));
+  });
+
+  it('closeOn ends the stream cleanly when it fires; a stream that ended first leaves no listener on it', async () => {
+    const shuttingDown = new AbortController();
+    const local = http.createServer((req, res) => {
+      const sse = openSse(req, res, { closeOn: shuttingDown.signal });
+      if (req.url === '/short') void sse.send({ data: 'bye' }).then(() => sse.close());
+    });
+    await new Promise<void>((r) => local.listen(0, '127.0.0.1', () => r()));
+    const url = `http://127.0.0.1:${(local.address() as AddressInfo).port}`;
+    for (let i = 0; i < 20; i++) await fetch(`${url}/short`).then((r) => r.text());
+    assert.equal(getEventListeners(shuttingDown.signal, 'abort').length, 0, 'streams that ended removed their listener');
+    const open = fetch(`${url}/feed`).then((r) => r.text()); // text() rejects if the connection is dropped, not ended
+    await waitFor(() => getEventListeners(shuttingDown.signal, 'abort').length === 1, 'the open stream to listen');
+    shuttingDown.abort();
+    assert.equal(await open, 'retry: 3000\n\n');
+    local.close();
   });
 
   it('lossy sends are refused once a slow client lets the buffer fill — memory stays bounded', async () => {

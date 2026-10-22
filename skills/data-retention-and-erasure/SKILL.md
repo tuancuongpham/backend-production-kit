@@ -43,20 +43,24 @@ auditInventory()       → personal-looking columns that no one has classified �
    - `createDataLifecycle` checks the inventory at startup (`checkInventory`) and refuses an unsafe one. An
      `anonymize` entry must overwrite every `personal` column and the subject column, or the kept row still
      identifies the person. Names must be plain identifiers, and retention needs a time column.
-   - Copy `pg-transaction.ts` and `pg-values.ts` along with `erasure.ts`: the kit's shared transaction helper, and the one that makes stored values hold any text.
+   - Copy `pg-transaction.ts`, `pg-values.ts` and `with-timeout.ts` along with `erasure.ts`: the kit's shared transaction helper, the one that makes stored values hold any text, and the deadline each external store gets.
 2. **Tables.** Add [references/erasure.sql](references/erasure.sql). The `erasure_requests` row records what was done
    per table and per store. Once every store is done it keeps only the hash.
 3. **Wire the request path.** "Delete my account" (after re-authentication) calls `requestErasure(userId)`, and the
    user is told the deadline. Schedule `processPending()` (a `job-queue` recurring job), and alert on requests close
    to `due_at`. Any number of instances may run it: each request is leased to one run at a time (`leaseSec`, default
    300 s, longer than the slowest store), and only that run writes the outcome back.
-4. **External stores.** Implement `erase(subjectId)` for each one:
+4. **External stores.** Implement `erase(subjectId, signal)` for each one:
    - Redis: SCAN + DEL by key pattern, which is why keys carry the user or tenant (`cache-stampede`);
    - the search index: delete by query;
    - Langfuse and traces: their delete API, or short retention;
    - the semantic cache: delete by user scope.
 
-   Make each one idempotent, because it is retried.
+   Make each one idempotent, because it is retried. Each call gets `storeTimeoutMs` (default 30 s) and a `signal`
+   that aborts then: pass it to the client. A store that never answers (a black-holed search cluster) used to hang
+   the user's "delete my account" request, and every request claimed in the same batch behind it. Now it counts as
+   pending and is retried. The stores' timeouts together must fit in `leaseSec`; the constructor checks it, and
+   refuses NaN settings.
 5. **Access requests.** `exportSubject(userId)` → a JSON bundle per table, delivered to the verified requester.
 6. **Retention.** Schedule `runRetention()` daily. It deletes in batches by `ctid`, so long deletes don't hold
    locks or flood replicas.
@@ -111,3 +115,5 @@ stores and how each is erased, backup policy.
   ([journey](../../verify/tests/journeys/data-rights.test.ts)).
 - Erasing a cached copy by letting it expire. Until then the deleted person's profile is still served; list the
   cache as an external store whose `erase` invalidates the key.
+- Awaiting an external store with no deadline. One that never answers holds the deletion request open, and the
+  user's request with it.

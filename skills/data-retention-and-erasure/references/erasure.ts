@@ -6,6 +6,7 @@ import { createHash } from 'node:crypto';
 import type pg from 'pg';
 import { withTransaction } from './pg-transaction.ts';
 import { pgJson } from './pg-values.ts';
+import { withTimeout } from './with-timeout.ts';
 
 export interface InventoryEntry {
   table: string;
@@ -33,8 +34,11 @@ export interface InventoryEntry {
 /** A copy outside this database: a cache, a search index, traces, object storage, a vendor's API. */
 export interface ExternalStore {
   name: string;
-  /** Must be idempotent: it is retried until it succeeds, and may run again after a crash. */
-  erase(subjectId: string): Promise<void>;
+  /**
+   * Must be idempotent: it is retried until it succeeds, and may run again after a crash. `signal` aborts after
+   * storeTimeoutMs: pass it to the client call. Past that, the store counts as pending and is retried later.
+   */
+  erase(subjectId: string, signal: AbortSignal): Promise<void>;
 }
 
 export interface DataLifecycleOptions {
@@ -47,6 +51,12 @@ export interface DataLifecycleOptions {
   dueDays?: number;
   /** How long one run may hold a request while it calls the external stores. Default 300 s. */
   leaseSec?: number;
+  /**
+   * How long one store may take to answer (default 30 s). A store that never answers (a black-holed search cluster)
+   * would otherwise hang the deletion request, and every request claimed in the same batch behind it. The stores'
+   * timeouts together must fit in the lease, or another run could take the request over while this one still calls.
+   */
+  storeTimeoutMs?: number;
 }
 
 const PERSONAL = new RegExp(
@@ -97,6 +107,7 @@ export class DataLifecycle {
   readonly #pepper: string;
   readonly #dueDays: number;
   readonly #leaseSec: number;
+  readonly #storeTimeoutMs: number;
 
   constructor(o: DataLifecycleOptions) {
     const problems = checkInventory(o.inventory);
@@ -104,12 +115,21 @@ export class DataLifecycle {
     if (!o.pepper) throw new Error('data lifecycle: a pepper is required');
     const names = (o.stores ?? []).map((s) => s.name);
     if (new Set(names).size !== names.length) throw new Error('data lifecycle: external store names must be unique');
+    // From an unset environment variable these are NaN: every erasure would then fail on its own insert.
+    const positive = (name: string, v: number, integer: boolean) => {
+      if (!(v > 0) || !Number.isFinite(v) || (integer && !Number.isInteger(v))) throw new RangeError(`data lifecycle: ${name} must be a positive ${integer ? 'integer' : 'number'}, got ${v}`);
+      return v;
+    };
     this.#pool = o.pool;
     this.#inventory = o.inventory;
     this.#stores = o.stores ?? [];
     this.#pepper = o.pepper;
-    this.#dueDays = o.dueDays ?? 30;
-    this.#leaseSec = o.leaseSec ?? 300;
+    this.#dueDays = positive('dueDays', o.dueDays ?? 30, true);
+    this.#leaseSec = positive('leaseSec', o.leaseSec ?? 300, false);
+    this.#storeTimeoutMs = positive('storeTimeoutMs', o.storeTimeoutMs ?? 30_000, true);
+    if (this.#stores.length * this.#storeTimeoutMs >= this.#leaseSec * 1000) {
+      throw new RangeError(`data lifecycle: ${this.#stores.length} stores × storeTimeoutMs ${this.#storeTimeoutMs} don't fit in leaseSec ${this.#leaseSec}`);
+    }
   }
 
   /**
@@ -222,7 +242,12 @@ export class DataLifecycle {
       const s = state[store.name] ?? { status: 'pending', attempts: 0 };
       if (s.status === 'done') continue;
       try {
-        await store.erase(claim.subject_id);
+        const ac = new AbortController();
+        await withTimeout(Promise.resolve().then(() => store.erase(claim.subject_id, ac.signal)), this.#storeTimeoutMs, () => {
+          const timeout = new Error(`no answer within ${this.#storeTimeoutMs} ms`);
+          ac.abort(timeout); // stops the call too, if the store passed the signal on
+          return timeout;
+        });
         state[store.name] = { status: 'done', attempts: s.attempts + 1, done_at: new Date().toISOString() };
       } catch (err) {
         state[store.name] = { status: 'pending', attempts: s.attempts + 1, error: String(err instanceof Error ? err.message : err).slice(0, 500) };

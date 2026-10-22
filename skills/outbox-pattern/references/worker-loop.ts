@@ -17,7 +17,13 @@ export interface LoopOptions {
 }
 
 export async function runLoops(o: LoopOptions): Promise<void> {
-  const pause = () => sleep(o.idleMs ?? 1000, undefined, { signal: o.signal }).catch(() => {});
+  const loops = o.loops ?? 1;
+  const idleMs = o.idleMs ?? 1000;
+  // A number read from an unset environment variable is NaN: `loops` would start no loop at all, and `idleMs` would
+  // poll every millisecond. Refuse it before anything runs.
+  if (!Number.isInteger(loops) || loops < 1) throw new RangeError(`worker loop: loops must be a positive integer, got ${loops}`);
+  if (!Number.isFinite(idleMs) || idleMs < 0) throw new RangeError(`worker loop: idleMs must be a number of ms, 0 or more, got ${idleMs}`);
+  const pause = () => sleep(idleMs, undefined, { signal: o.signal }).catch(() => {});
   const loop = async () => {
     while (!o.signal.aborted) {
       let worked = false;
@@ -29,5 +35,5 @@ export async function runLoops(o: LoopOptions): Promise<void> {
       if (!worked) await pause();
     }
   };
-  await Promise.all(Array.from({ length: Math.max(1, o.loops ?? 1) }, loop));
+  await Promise.all(Array.from({ length: loops }, loop));
 }

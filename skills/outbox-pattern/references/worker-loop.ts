@@ -1,6 +1,7 @@
 // Polling loops for background workers. Vendored into each skill that imports it: edit shared/worker-loop.ts,
 // then run `npm run sync:shared`. `npm run validate` fails if a copy drifts.
 import { setTimeout as sleep } from 'node:timers/promises';
+import { callHook } from './hooks.ts';
 
 export interface LoopOptions {
   /** One unit of work. Resolves true when it found work (the loop goes again at once), false when idle. */
@@ -12,7 +13,7 @@ export interface LoopOptions {
   /** Pause after an idle tick or an error, ms (default 1000). Aborting ends the pause at once. */
   idleMs?: number;
   /** A tick that threw. The loop pauses for `idleMs` and keeps going. */
-  onError?: (err: unknown) => void;
+  onError?: (err: unknown) => unknown;
 }
 
 export async function runLoops(o: LoopOptions): Promise<void> {
@@ -23,7 +24,7 @@ export async function runLoops(o: LoopOptions): Promise<void> {
       try {
         worked = await o.tick();
       } catch (err) {
-        o.onError?.(err);
+        callHook(o.onError, err); // a logger that throws must not stop the worker
       }
       if (!worked) await pause();
     }

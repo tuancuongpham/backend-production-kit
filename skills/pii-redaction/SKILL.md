@@ -56,6 +56,8 @@ Use two mechanisms together:
   - a proxy, a `Map` with object keys, or a library error with a non-string message is handled the same way.
 - An error keeps its `code`, its `cause` and a redacted `detail` (`Key (email)=([EMAIL]) already exists`), never
   the rest of its properties. An HTTP client's error carries the request config, Authorization header included.
+- Lines with nothing personal in them (order ids, timings, cache keys, trace ids) come out unchanged
+  ([regressions/round-4.test.ts](../../verify/tests/regressions/round-4.test.ts)).
 - HMAC placeholders are stable for the same value and differ for different values.
 - The real logger configuration (pino hooks) redacts both merged objects and message strings.
 - A custom detector without the `g` flag, or a hint with it, is refused at startup ([regressions/round-3.test.ts](../../verify/tests/regressions/round-3.test.ts)).

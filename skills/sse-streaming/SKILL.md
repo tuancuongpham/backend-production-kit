@@ -65,4 +65,5 @@ ADR: SSE vs WebSocket, replay store, lossless vs lossy per stream type, connecti
 - Replaying *before* subscribing: events published in between are lost.
 - A per-client queue with no limit between the feed and a slow socket: memory grows with every event the stalled client hasn't read.
 - Splitting data on `\n` only. The browser also breaks lines on a bare `\r`, so user content can write its own `id:` or `event:` field.
+- Testing streams with a parser that splits on `\n\n`. It can't see what the browser sees; read them as the spec says (`verify/tests/support/sse-parser.ts`).
 - Calling feed subscribers bare inside `append()`. One that throws keeps the event from every subscriber after it and fails the publisher. Each one runs through `callHook`; so does `onOverflow`, which used to keep the stalled client connected when it threw.

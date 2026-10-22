@@ -52,6 +52,9 @@ The full go-live list is in [references/checklist.md](references/checklist.md).
 - A straggler beyond the grace period → shutdown still completes within the bound (`forced: true`) and the hooks still run.
 - `ctx.shuttingDown` fires after the drain delay, not during it: an open stream ends then, and the shutdown finishes
   without waiting out the grace period (`forced: false`).
+- A clean shutdown leaves no timer behind, so the process exits at once
+  ([regressions/round-4.test.ts](../../verify/tests/regressions/round-4.test.ts)). It used to stay alive for the whole
+  `shutdownGraceMs`.
 - A client that disconnects mid-upload fails `readBody` at once; `deadline(ms, ctx.signal)` aborts on whichever
   comes first.
 - `installSignalHandlers`: SIGTERM drains then exits 0, a second signal exits 1 at once, a failing shutdown exits 1.

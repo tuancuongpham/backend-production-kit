@@ -100,6 +100,10 @@ Against real Postgres. [verify/tests/skills/llm-tool-safety.test.ts](../../verif
   - a retried approved call returns its first result instead of "the approval was already used";
   - an approver from another tenant can't decide the approval;
   - a tool-call id left `running` by a crashed process can be retried.
+- [regressions/round-4.test.ts](../../verify/tests/regressions/round-4.test.ts):
+  - an unanchored pattern refuses `o-1'; DROP TABLE refunds; --`;
+  - made-up and hand-edited approval ids are unknown approvals;
+  - a result cut mid-emoji is stored, and the retry replays it.
 
 How to write these tests so they prove something:
 - Script the model: feed a tool result containing an injected instruction, then make the next call follow it. The

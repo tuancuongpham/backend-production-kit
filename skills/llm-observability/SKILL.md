@@ -31,14 +31,14 @@ Use OpenTelemetry as the backbone, because it is vendor-neutral and auto-instrum
 
 ## Verification (required)
 
-[verify/tests/llm-observability.test.ts](../../verify/tests/llm-observability.test.ts) uses the real OTel SDK with an in-memory exporter:
+[verify/tests/skills/llm-observability.test.ts](../../verify/tests/skills/llm-observability.test.ts) uses the real OTel SDK with an in-memory exporter:
 - One request produces one trace: retrieval and LLM spans are children of the HTTP span; `currentTraceId()` matches.
 - The LLM span carries model, tokens, cost, tenant and prompt version; the prompt includes the retrieved chunk ids; **emails and card numbers are redacted** in input, output and retrieval query (integration with the `pii-redaction` redactor).
 - Retrieval span lists `documentId@version` for each chunk.
 - `captureContent: false` stores no text but keeps the metrics.
-- A 240 KB prompt is stored as at most 32 KiB per attribute, marked as truncated ([latent-bugs-round2.test.ts](../../verify/tests/latent-bugs-round2.test.ts)).
+- A 240 KB prompt is stored as at most 32 KiB per attribute, marked as truncated ([regressions/round-2.test.ts](../../verify/tests/regressions/round-2.test.ts)).
 - An error sets status ERROR with an exception event and rethrows.
-- A reply without text (`content: null`, a tool call) passed through the redactor → the call succeeds and returns the reply ([latent-bugs-round3.test.ts](../../verify/tests/latent-bugs-round3.test.ts)).
+- A reply without text (`content: null`, a tool call) passed through the redactor → the call succeeds and returns the reply ([regressions/round-3.test.ts](../../verify/tests/regressions/round-3.test.ts)).
 - Trace context survives an async hop: the consumer span has the producer's trace id and parent span id.
 
 End to end, after wiring the real exporter: send one chat request in staging and confirm in Langfuse/Jaeger that a single trace shows HTTP → SQL → retrieve → chat, with the prompt visible and redacted. Also confirm a queued follow-up job appears in the same trace.

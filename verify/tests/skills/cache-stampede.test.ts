@@ -1,8 +1,9 @@
 import { after, before, describe, it } from 'node:test';
 import assert from 'node:assert/strict';
 import { Redis } from 'ioredis';
-import { REDIS_URL, sleep } from './helpers.ts';
-import { createCache, tenantKey } from '../../skills/cache-stampede/references/cache.ts';
+import { REDIS_URL } from '../support/infra.ts';
+import { sleep } from '../support/wait.ts';
+import { createCache, tenantKey } from '../../../skills/cache-stampede/references/cache.ts';
 
 const clients: Redis[] = [];
 const redisClient = () => {

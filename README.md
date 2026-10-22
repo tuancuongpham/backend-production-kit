@@ -84,7 +84,7 @@ found in it (several are classic production incidents), now fixed and guarded by
 | A dependency's circuit breaker ends its cooldown | every waiting request went to the dependency that was still down: **10 calls instead of 1 probe** | a real half-open state, shared by the gateway, limiter and cache |
 
 The last review round listed 34 hypotheses about what could break and wrote each as a test. All 34 failed on the
-previous release, and all are fixed ([`latent-bugs-round3.test.ts`](verify/tests/latent-bugs-round3.test.ts)).
+previous release, and all are fixed ([`regressions/round-3.test.ts`](verify/tests/regressions/round-3.test.ts)).
 
 ## Incidents it is tested against
 

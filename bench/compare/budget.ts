@@ -5,7 +5,7 @@
 // All must stay exact under concurrency: 200 parallel $1 reservations against a $50 limit → 50 succeed.
 // Run inside the Docker network:  npm run bench:docker -- bench/compare/budget.ts
 import pg from 'pg';
-import { freshDatabase, runSqlFile } from '../../verify/tests/helpers.ts';
+import { freshDatabase, runSqlFile } from '../../verify/tests/support/infra.ts';
 import { pgBudget } from '../../skills/llm-gateway/references/pg-stores.ts';
 import { latency, save, table, throughput } from './lib.ts';
 

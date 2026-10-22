@@ -2,8 +2,8 @@ import { after, before, beforeEach, describe, it } from 'node:test';
 import assert from 'node:assert/strict';
 import pg from 'pg';
 import { Redis } from 'ioredis';
-import { REDIS_URL, freshDatabase, runSqlFile } from './helpers.ts';
-import { createDataLifecycle, type ExternalStore, type InventoryEntry } from '../../skills/data-retention-and-erasure/references/erasure.ts';
+import { REDIS_URL, freshDatabase, runSqlFile } from '../support/infra.ts';
+import { createDataLifecycle, type ExternalStore, type InventoryEntry } from '../../../skills/data-retention-and-erasure/references/erasure.ts';
 
 let pool: pg.Pool;
 let redis: Redis;

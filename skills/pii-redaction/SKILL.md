@@ -36,12 +36,12 @@ Use two mechanisms together:
 
 ## Verification (required)
 
-[verify/tests/pii-redaction.test.ts](../../verify/tests/pii-redaction.test.ts) is the template:
+[verify/tests/skills/pii-redaction.test.ts](../../verify/tests/skills/pii-redaction.test.ts) is the template:
 - Every fixture in "redacts" becomes its placeholder; every fixture in "keeps" is unchanged (Luhn and digit-boundary guards work).
 - Sensitive keys are replaced at any depth; arrays, `Error` objects (message **and** stack), cycles and deep nesting are handled without throwing; input objects are not mutated.
 - HMAC placeholders are stable for the same value and differ for different values.
 - The real logger configuration (pino hooks) redacts both merged objects and message strings.
-- A custom detector without the `g` flag, or a hint with it, is refused at startup ([latent-bugs-round3.test.ts](../../verify/tests/latent-bugs-round3.test.ts)).
+- A custom detector without the `g` flag, or a hint with it, is refused at startup ([regressions/round-3.test.ts](../../verify/tests/regressions/round-3.test.ts)).
 - **End-to-end**: trigger an error in a request containing an email and a card number, then grep the captured log output and the error-tracker payload. Neither raw value should be present.
 
 ## Record the decision

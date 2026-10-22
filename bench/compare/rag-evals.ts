@@ -4,7 +4,8 @@
 // Query embeddings are noise here (no embedding model), so keyword search carries retrieval.
 // Run inside the Docker network:  npm run bench:docker -- bench/compare/rag-evals.ts
 import pg from 'pg';
-import { fakeEmbedding, freshDatabase, runSqlFile, toVectorLiteral } from '../../verify/tests/helpers.ts';
+import { freshDatabase, runSqlFile } from '../../verify/tests/support/infra.ts';
+import { fakeEmbedding, toVectorLiteral } from '../../verify/tests/support/vectors.ts';
 import { CHUNKS, KEYWORD_QUERIES, QUESTION_QUERIES, TENANT } from '../../verify/tests/fixtures/help-center.ts';
 import { hybridSearch, withTenant } from '../../skills/multitenant-postgres/references/tenant-db.ts';
 import { compareReports, evaluateRetriever, toMarkdown, type GoldenQuery } from '../../skills/rag-evals/references/retrieval-eval.ts';

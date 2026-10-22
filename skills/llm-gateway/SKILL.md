@@ -53,7 +53,7 @@ LLM APIs are the most expensive and least reliable dependency most apps have. Th
 
 ## Verification (required)
 
-[verify/tests/llm-gateway.test.ts](../../verify/tests/llm-gateway.test.ts) (fake providers, deterministic) and [llm-gateway-pg.test.ts](../../verify/tests/llm-gateway-pg.test.ts) (real Postgres):
+[verify/tests/skills/llm-gateway.test.ts](../../verify/tests/skills/llm-gateway.test.ts) (fake providers, deterministic) and [llm-gateway-pg.test.ts](../../verify/tests/skills/llm-gateway-pg.test.ts) (real Postgres):
 - **Exact cache**: an identical request is an `exact` hit, the provider is called once, and cost 0 is recorded for the hit.
 - **Semantic, serve mode**: a paraphrase hits; a negation and an unrelated question miss (controlled vectors; see the eval note below).
 - **Semantic, default shadow mode**: a paraphrase is still a `miss`, the model is called, and `onShadowHit` receives both questions plus the similarity.
@@ -72,10 +72,10 @@ LLM APIs are the most expensive and least reliable dependency most apps have. Th
   - a failed call releases its reservation;
   - cache hits are still served when out of budget.
 - **Accounting**: a usage sink that throws or rejects doesn't fail the request.
-- **Failures after the answer** ([latent-bugs-round3.test.ts](../../verify/tests/latent-bugs-round3.test.ts)): a cache store that fails to write, or a budget store that fails to settle, after the primary answered → the answer is returned, and the fallback is never called. A cache store that is down → the request is still answered.
+- **Failures after the answer** ([regressions/round-3.test.ts](../../verify/tests/regressions/round-3.test.ts)): a cache store that fails to write, or a budget store that fails to settle, after the primary answered → the answer is returned, and the fallback is never called. A cache store that is down → the request is still answered.
 - **Breaker half-open**: after the cooldown, 10 waiting requests send 1 probe to the dead provider, not 10. A fallback answer cached during an outage is gone 10 minutes later. An already cancelled request never reaches a provider.
 - **Postgres stores**: TTL expiry, similarity threshold, scope isolation.
-- **Many tenants, same question** ([latent-bugs-round2.test.ts](../../verify/tests/latent-bugs-round2.test.ts)): 100 tenants cache a popular question, and this tenant's own entry is still found with an HNSW index present. `pruneLlmCache` removes only expired rows.
+- **Many tenants, same question** ([regressions/round-2.test.ts](../../verify/tests/regressions/round-2.test.ts)): 100 tenants cache a popular question, and this tenant's own entry is still found with an HNSW index present. `pruneLlmCache` removes only expired rows.
 
 When writing your own tests: make the concurrency test real (requests in flight together, e.g. a provider that sleeps), and inject a failing usage sink. Code inspection alone doesn't prove either property.
 

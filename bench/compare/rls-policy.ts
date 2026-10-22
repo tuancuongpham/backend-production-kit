@@ -12,7 +12,7 @@
 // Data: 200 tenants × 1,000 documents = 200,000 rows.
 // Run inside the Docker network:  npm run bench:docker -- bench/compare/rls-policy.ts
 import pg from 'pg';
-import { freshDatabase, runSqlFile, withUser } from '../../verify/tests/helpers.ts';
+import { freshDatabase, runSqlFile, withUser } from '../../verify/tests/support/infra.ts';
 import { latency, planSummary, save, selfTimed, table } from './lib.ts';
 
 const dbUrl = await freshDatabase('kit_bench_rls');

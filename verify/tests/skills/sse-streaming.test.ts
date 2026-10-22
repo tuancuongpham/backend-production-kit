@@ -1,8 +1,8 @@
 import { after, before, describe, it } from 'node:test';
 import assert from 'node:assert/strict';
 import http from 'node:http';
-import { sleep } from './helpers.ts';
-import { createReplayBuffer, openSse, serveFeed, streamTokens } from '../../skills/sse-streaming/references/sse.ts';
+import { sleep } from '../support/wait.ts';
+import { createReplayBuffer, openSse, serveFeed, streamTokens } from '../../../skills/sse-streaming/references/sse.ts';
 
 let server: http.Server;
 let base: string;

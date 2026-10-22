@@ -105,7 +105,7 @@ Each of these was a bug in this kit, found by a failing test first. The fix is t
 - No component keeps module-level mutable state.
 - Every worker has a single-step method for tests (`processOnce`, `relayOnce`, `tick`) and a loop for production
   (`run({ signal })`).
-- [`verify/tests/latent-bugs-round3.test.ts`](../verify/tests/latent-bugs-round3.test.ts) holds the 34 hypotheses
+- [`verify/tests/regressions/round-3.test.ts`](../verify/tests/regressions/round-3.test.ts) holds the 34 hypotheses
   of the last review as tests, every one of which failed on the code before its fix.
 
 ## What it deliberately doesn't do

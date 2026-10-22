@@ -6,7 +6,7 @@
 // Measured: the claim statement alone (BEGIN/ROLLBACK around it), first with nothing due, then with 10,000 due.
 // Run inside the Docker network:  npm run bench:docker -- bench/compare/job-queue.ts
 import pg from 'pg';
-import { freshDatabase, runSqlFile } from '../../verify/tests/helpers.ts';
+import { freshDatabase, runSqlFile } from '../../verify/tests/support/infra.ts';
 import { createWorker } from '../../skills/job-queue/references/jobs.ts';
 import { latency, planSummary, save, selfTimed, table } from './lib.ts';
 

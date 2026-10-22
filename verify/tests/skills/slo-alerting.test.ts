@@ -4,7 +4,7 @@ import { spawnSync } from 'node:child_process';
 import { chmodSync, mkdtempSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
-import { burnAlerts, prometheusRules, simulate, type Slo } from '../../skills/slo-alerting/references/slo.ts';
+import { burnAlerts, prometheusRules, simulate, type Slo } from '../../../skills/slo-alerting/references/slo.ts';
 
 const checkout: Slo = {
   name: 'checkout-availability',

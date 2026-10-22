@@ -3,7 +3,8 @@
 import { writeFileSync } from 'node:fs';
 import pg from 'pg';
 import { Redis } from 'ioredis';
-import { freshDatabase, REDIS_URL, runSqlFile, sleep } from '../verify/tests/helpers.ts';
+import { freshDatabase, REDIS_URL, runSqlFile } from '../verify/tests/support/infra.ts';
+import { sleep } from '../verify/tests/support/wait.ts';
 import { createRedactor } from '../skills/pii-redaction/references/redact.ts';
 import { createRateLimiter } from '../skills/rate-limiting/references/limiter.ts';
 import { createInboxWorker, ingest } from '../skills/webhook-ingestion/references/webhooks.ts';

@@ -1,8 +1,8 @@
 import { after, before, describe, it } from 'node:test';
 import assert from 'node:assert/strict';
 import pg from 'pg';
-import { freshDatabase, runSqlFile, withUser } from './helpers.ts';
-import { createAgentDb, exampleTools, toToolSchemas, ToolInputError, type AuditEntry } from '../../skills/agent-safe-db/references/agent-db-tool.ts';
+import { freshDatabase, runSqlFile, withUser } from '../support/infra.ts';
+import { createAgentDb, exampleTools, toToolSchemas, ToolInputError, type AuditEntry } from '../../../skills/agent-safe-db/references/agent-db-tool.ts';
 
 const TENANT_A = '11111111-1111-4111-8111-111111111111';
 const TENANT_B = '22222222-2222-4222-8222-222222222222';

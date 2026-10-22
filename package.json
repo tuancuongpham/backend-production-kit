@@ -10,8 +10,8 @@
   "scripts": {
     "verify:up": "docker compose -f verify/docker-compose.yml up -d --wait",
     "verify:down": "docker compose -f verify/docker-compose.yml down -v",
-    "test": "node --test --test-concurrency=1 \"verify/tests/*.test.ts\"",
-    "test:unit": "node --test verify/tests/pii-redaction.test.ts verify/tests/llm-gateway.test.ts verify/tests/service-hardening.test.ts verify/tests/sse-streaming.test.ts verify/tests/llm-observability.test.ts verify/tests/adr-writer.test.ts",
+    "test": "node --test --test-concurrency=1 \"verify/tests/**/*.test.ts\"",
+    "test:unit": "node --test verify/tests/skills/pii-redaction.test.ts verify/tests/skills/llm-gateway.test.ts verify/tests/skills/service-hardening.test.ts verify/tests/skills/sse-streaming.test.ts verify/tests/skills/llm-observability.test.ts verify/tests/skills/adr-writer.test.ts",
     "validate": "node scripts/validate-skills.mjs",
     "typecheck": "tsc -p tsconfig.json",
     "sync:shared": "node scripts/sync-shared.mjs",

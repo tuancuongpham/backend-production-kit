@@ -66,7 +66,7 @@ auditInventory()       â†’ personal-looking columns that no one has classified â
 
 ## Verification (required)
 
-Against real Postgres and Redis. [verify/tests/data-retention-and-erasure.test.ts](../../verify/tests/data-retention-and-erasure.test.ts) covers:
+Against real Postgres and Redis. [verify/tests/skills/data-retention-and-erasure.test.ts](../../verify/tests/skills/data-retention-and-erasure.test.ts) covers:
 - **After erasing Alice, a scan of every text, json and inet column in the database finds none of her email, name,
   phone or id.**
   - The invoice totals are unchanged, because orders were anonymized, not deleted.
@@ -78,7 +78,7 @@ Against real Postgres and Redis. [verify/tests/data-retention-and-erasure.test.t
 - An access request exports every inventoried row about the person.
 - Retention deletes 1,200 old chat messages in batches of 500, and keeps recent ones and tables without a window.
 - The audit flags `email`, `ho_ten` and `so_dien_thoai` on a new table, and passes once they're classified.
-- [latent-bugs-round3.test.ts](../../verify/tests/latent-bugs-round3.test.ts):
+- [regressions/round-3.test.ts](../../verify/tests/regressions/round-3.test.ts):
   - two instances processing the same request at once can't reopen it with the subject already forgotten;
   - `processPending` reports the requests it completed correctly when more than one batch is open;
   - an `anonymize` entry that leaves `shipping_address` in place is refused at startup.

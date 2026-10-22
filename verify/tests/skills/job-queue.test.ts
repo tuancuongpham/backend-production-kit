@@ -1,8 +1,9 @@
 import { after, before, beforeEach, describe, it } from 'node:test';
 import assert from 'node:assert/strict';
 import pg from 'pg';
-import { freshDatabase, runSqlFile, sleep } from './helpers.ts';
-import { createScheduler, createWorker, enqueue, every, pruneJobs, retryDead } from '../../skills/job-queue/references/jobs.ts';
+import { freshDatabase, runSqlFile } from '../support/infra.ts';
+import { sleep, waitFor } from '../support/wait.ts';
+import { createScheduler, createWorker, enqueue, every, pruneJobs, retryDead } from '../../../skills/job-queue/references/jobs.ts';
 
 let pool: pg.Pool;
 
@@ -14,13 +15,6 @@ const drain = async (worker: ReturnType<typeof createWorker>) => {
   const outcomes: string[] = [];
   for (let r = await worker.processOnce(); r.length > 0; r = await worker.processOnce()) outcomes.push(...r);
   return outcomes;
-};
-const until = async (condition: () => boolean | Promise<boolean>, what: string, ms = 5000) => {
-  const deadline = Date.now() + ms;
-  while (!(await condition())) {
-    assert.ok(Date.now() < deadline, `timed out waiting for ${what}`);
-    await sleep(20);
-  }
 };
 
 describe('job-queue', () => {
@@ -123,7 +117,7 @@ describe('job-queue', () => {
     const workerB = createWorker({ pool, baseDelayMs: 0, handlers: { report: async () => void ranBy.push('B') } });
     const id = await enqueue(pool, { kind: 'report' });
     const a = workerA.processOnce();
-    await until(() => ranBy.includes('A'), 'A to start');
+    await waitFor(() => ranBy.includes('A'), 'A to start');
     // A freezes (GC pause, a laptop lid) long enough for its lease to lapse without a heartbeat.
     await pool.query(`UPDATE jobs SET locked_until = now() - interval '1 second' WHERE id = $1`, [id]);
     assert.deepEqual(await workerB.maintain(), { rescued: 1, promoted: 1 });
@@ -219,11 +213,11 @@ describe('job-queue', () => {
     for (let i = 0; i < 12; i++) await enqueue(pool, { kind: 'work', runAt: i % 3 === 0 ? new Date(now + 200) : undefined });
     const stop = new AbortController();
     const running = worker.run({ loops: 4, idleMs: 20, maintainEveryMs: 50, signal: stop.signal });
-    await until(() => finished === 12, 'all 12 jobs, including the 4 delayed ones');
+    await waitFor(() => finished === 12, 'all 12 jobs, including the 4 delayed ones');
     assert.equal(maxActive, 4);
 
     for (let i = 0; i < 8; i++) await enqueue(pool, { kind: 'work' });
-    await until(() => active > 0, 'jobs to be running');
+    await waitFor(() => active > 0, 'jobs to be running');
     stop.abort(); // a deploy's SIGTERM
     await running;
     const { rows } = await pool.query(`SELECT status FROM jobs WHERE status NOT IN ('done', 'available')`);

@@ -1,7 +1,8 @@
 import { after, before, beforeEach, describe, it } from 'node:test';
 import assert from 'node:assert/strict';
 import pg from 'pg';
-import { freshDatabase, runSqlFile, sleep } from './helpers.ts';
+import { freshDatabase, runSqlFile } from '../support/infra.ts';
+import { sleep } from '../support/wait.ts';
 import {
   downstreamKey,
   IdempotencyError,
@@ -12,7 +13,7 @@ import {
   runIdempotentExternal,
   type IdempotentRequest,
   type StoredResponse,
-} from '../../skills/idempotency-keys/references/idempotency.ts';
+} from '../../../skills/idempotency-keys/references/idempotency.ts';
 
 let pool: pg.Pool;
 let calls = 0;

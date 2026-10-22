@@ -386,7 +386,7 @@ and after the 0.2.0 changes:
   - Now every quantifier is bounded (RFC 5321 limits), each detector has a cheap `hint` pre-check that skips its
     regex when it can't match, short strings return immediately, and strings above `maxStringLength` (16 KiB) are
     truncated before scanning.
-  - The 50 KB result combines the regex fix and truncation. `verify/tests/latent-bugs.test.ts` checks the regexes
+  - The 50 KB result combines the regex fix and truncation. `verify/tests/regressions/round-1.test.ts` checks the regexes
     alone, without truncation, at under 200 ms for 50 KB.
 - **Webhook worker.** `concurrency` processes a claimed batch in parallel lanes, each row in its own transaction.
   0.3.0 replaced this as the recommended layout with `run({ loops })`; see above.

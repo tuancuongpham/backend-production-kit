@@ -5,7 +5,7 @@
 //      vector_recv: int16 dim, int16 unused, then dim × float32 big-endian
 // Run inside the Docker network:  npm run bench:docker -- bench/compare/vector-params.ts
 import pg from 'pg';
-import { freshDatabase, runSqlFile } from '../../verify/tests/helpers.ts';
+import { freshDatabase, runSqlFile } from '../../verify/tests/support/infra.ts';
 import { vectorParam } from '../../skills/llm-gateway/references/pg-stores.ts';
 import { latency, randomVector, save, table } from './lib.ts';
 

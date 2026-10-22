@@ -81,7 +81,7 @@ cron:     tick() on every instance → each fire enqueued exactly once
 
 ## Verification (required)
 
-Against real Postgres. [verify/tests/job-queue.test.ts](../../verify/tests/job-queue.test.ts) covers:
+Against real Postgres. [verify/tests/skills/job-queue.test.ts](../../verify/tests/skills/job-queue.test.ts) covers:
 - Enqueue inside a transaction that rolls back → no job; one that commits → exactly one.
 - Due jobs run by priority, then oldest first. **A delayed job never runs early**, and runs once promoted.
 - A failing job retries (with a real base delay, the retry lands 30–60 s out), dies after `max_attempts`, calls
@@ -97,7 +97,7 @@ Against real Postgres. [verify/tests/job-queue.test.ts](../../verify/tests/job-q
 - `run()` drains with four loops in parallel, including delayed jobs, and stopping leaves nothing `running`.
 - A batch of 3 slow jobs on a 1 s lease, with another instance rescuing expired leases every 100 ms → all 3 run,
   none dies unrun. Stopping mid-batch waits for the running job only and hands the other 2 back with
-  `attempts` 0 ([latent-bugs-round3.test.ts](../../verify/tests/latent-bugs-round3.test.ts)).
+  `attempts` 0 ([regressions/round-3.test.ts](../../verify/tests/regressions/round-3.test.ts)).
 - `pruneJobs` deletes old finished jobs in batches and keeps dead and recent ones; `job_queue_stats` reports depth
   and the oldest wait.
 

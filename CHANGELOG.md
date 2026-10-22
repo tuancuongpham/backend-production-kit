@@ -5,7 +5,7 @@
 ### Fixed — latent bugs, round 3
 Every reference file was read again, and each suspected failure was written down as a hypothesis and as a test of
 the behaviour the skill promises. All 34 tests failed on 0.4.0 and pass now
-(`verify/tests/latent-bugs-round3.test.ts`). One more hypothesis was refuted: an any-word tsquery built with
+(`verify/tests/regressions/round-3.test.ts`). One more hypothesis was refuted: an any-word tsquery built with
 `quote_literal` can't break on user input, because Postgres's `simple` parser never yields a lexeme with a
 backslash or a quote.
 - `webhook-ingestion`: a handler slower than `stuckAfterSec` was claimed again and run alongside the first, and both
@@ -214,7 +214,7 @@ reused for another request gets 422.
   - the shipped try-lock answers duplicates with 409 in 8 ms and holds 0.13 s.
 
 ### Fixed — latent bugs, round 2
-Each bug was reproduced by a failing test first (`verify/tests/latent-bugs-round2.test.ts`), then fixed.
+Each bug was reproduced by a failing test first (`verify/tests/regressions/round-2.test.ts`), then fixed.
 - `llm-gateway`: with an HNSW index, the semantic cache filtered by tenant *after* the index returned its 40
   nearest rows across all tenants. A question many tenants had cached crowded out this tenant's own entry: 4 hits
   out of 20 for a big tenant, each miss a paid model call. Search is now exact within the scope by default, and
@@ -242,7 +242,7 @@ Each bug was reproduced by a failing test first (`verify/tests/latent-bugs-round
   - Cause: node-postgres emits `error` on the checked-out client, and nothing listened.
   - Fix: each function now listens while it holds the client. Only that request fails, and the pool drops the dead
     client.
-  - Tests: `verify/tests/connection-loss.test.ts` kills the connection inside each one, and it fails without the fix.
+  - Tests: `verify/tests/invariants/connection-loss.test.ts` kills the connection inside each one, and it fails without the fix.
   - The service-hardening checklist now also requires `pool.on('error')`; an idle pooled client hits the same crash.
 
 ### Performance — approach comparisons (`bench/compare/`, tables in docs/performance.md)
@@ -275,7 +275,7 @@ Each hot path's alternatives were measured side by side inside the Docker networ
 ## 0.2.0 — 2026-10-21
 
 ### Fixed — latent bugs in the reference code
-Each bug was reproduced by a failing test first (`verify/tests/latent-bugs.test.ts`), then fixed.
+Each bug was reproduced by a failing test first (`verify/tests/regressions/round-1.test.ts`), then fixed.
 - `pii-redaction`: the email pattern's unbounded local part made redaction O(n²) on long strings. A 50 KB log
   line without `@` took ~1.9 s, a denial-of-service through the logging path. Quantifiers are now bounded,
   detectors have cheap pre-checks, and strings over 16 KiB are truncated before scanning.

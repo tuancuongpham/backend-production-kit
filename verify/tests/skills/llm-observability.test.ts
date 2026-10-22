@@ -11,8 +11,8 @@ import {
   runWithTraceContext,
   withLlmSpan,
   withRetrievalSpan,
-} from '../../skills/llm-observability/references/llm-tracing.ts';
-import { createRedactor } from '../../skills/pii-redaction/references/redact.ts';
+} from '../../../skills/llm-observability/references/llm-tracing.ts';
+import { createRedactor } from '../../../skills/pii-redaction/references/redact.ts';
 
 const exporter = new InMemorySpanExporter();
 const provider = new BasicTracerProvider({ spanProcessors: [new SimpleSpanProcessor(exporter)] });

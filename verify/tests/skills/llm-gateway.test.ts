@@ -10,7 +10,7 @@ import {
   type ChatRequest,
   type Provider,
   type UsageRecord,
-} from '../../skills/llm-gateway/references/gateway.ts';
+} from '../../../skills/llm-gateway/references/gateway.ts';
 
 const prices = {
   'big-model': { inputPer1M: 3, outputPer1M: 15 },

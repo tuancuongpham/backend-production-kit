@@ -3,13 +3,15 @@
 import { describe, it } from 'node:test';
 import assert from 'node:assert/strict';
 import { Redis } from 'ioredis';
-import { createRedactor } from '../../skills/pii-redaction/references/redact.ts';
-import { createGateway, memoryBudget, type Provider } from '../../skills/llm-gateway/references/gateway.ts';
-import { createRateLimiter } from '../../skills/rate-limiting/references/limiter.ts';
+import { createRedactor } from '../../../skills/pii-redaction/references/redact.ts';
+import { createGateway, memoryBudget, type Provider } from '../../../skills/llm-gateway/references/gateway.ts';
+import { createRateLimiter } from '../../../skills/rate-limiting/references/limiter.ts';
 import pg from 'pg';
-import { fakeEmbedding, freshDatabase, REDIS_URL, runSqlFile, sleep, toVectorLiteral, withUser } from './helpers.ts';
-import { createInboxWorker, ingest, type Handler } from '../../skills/webhook-ingestion/references/webhooks.ts';
-import { hybridSearch, withTenant } from '../../skills/multitenant-postgres/references/tenant-db.ts';
+import { freshDatabase, REDIS_URL, runSqlFile, withUser } from '../support/infra.ts';
+import { fakeEmbedding, toVectorLiteral } from '../support/vectors.ts';
+import { sleep } from '../support/wait.ts';
+import { createInboxWorker, ingest, type Handler } from '../../../skills/webhook-ingestion/references/webhooks.ts';
+import { hybridSearch, withTenant } from '../../../skills/multitenant-postgres/references/tenant-db.ts';
 
 describe('latent bugs', () => {
   it('pii-redaction: large log strings are redacted in linear time (no regex blow-up)', () => {

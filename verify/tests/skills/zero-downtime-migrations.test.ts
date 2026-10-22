@@ -1,9 +1,10 @@
 import { after, before, describe, it } from 'node:test';
 import assert from 'node:assert/strict';
 import pg from 'pg';
-import { freshDatabase, sleep } from './helpers.ts';
-import { backfill, runStep } from '../../skills/zero-downtime-migrations/references/migrate.ts';
-import { lintMigration } from '../../skills/zero-downtime-migrations/references/lint.ts';
+import { freshDatabase } from '../support/infra.ts';
+import { sleep } from '../support/wait.ts';
+import { backfill, runStep } from '../../../skills/zero-downtime-migrations/references/migrate.ts';
+import { lintMigration } from '../../../skills/zero-downtime-migrations/references/lint.ts';
 
 let pool: pg.Pool;
 

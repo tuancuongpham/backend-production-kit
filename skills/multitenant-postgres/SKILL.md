@@ -36,7 +36,7 @@ Shared-schema multi-tenancy fails in one way: a query that forgets `WHERE tenant
 
 ## Verification (required)
 
-Run against real Postgres with pgvector. [verify/tests/multitenant-postgres.test.ts](../../verify/tests/multitenant-postgres.test.ts) covers all of these:
+Run against real Postgres with pgvector. [verify/tests/skills/multitenant-postgres.test.ts](../../verify/tests/skills/multitenant-postgres.test.ts) covers all of these:
 - Tenant A counts only A's rows; with no tenant set the app role sees 0 rows; a non-superuser owner also sees 0 (FORCE).
 - After `withTenant` returns, the same pooled connection has no tenant set. Malformed tenant ids (an SQL-injection string, a trailing newline, an empty string) are rejected before any SQL runs.
 - Insert with B's `tenant_id` while in A's context → `42501`; moving a row to B → `42501`; a child pointing at B's parent → `23503`; `UPDATE … WHERE id = <B's id>` affects 0 rows.
@@ -54,5 +54,5 @@ ADR: isolation model, keyword ranker (ts_rank vs BM25 extension), embedding mode
 - Forgetting background workers, cron jobs and admin scripts. With FORCE they see nothing, which is correct, but it surprises people; give them an explicit tenant loop.
 - A tenant-id function without a volatility marker (plpgsql defaults to `VOLATILE`): every RLS query becomes a full table scan. Declare it `STABLE`, and prefer `LANGUAGE sql` so it can be inlined.
 - Auditing RLS by "a policy exists". A `USING (true)` policy (added "temporarily" for an admin screen) passes that check and lets every tenant read every row.
-- Holding a pooled client with no `error` listener. If Postgres ends the connection between two queries (a failover, or `idle_in_transaction_session_timeout` while the request calls something slow), node-postgres emits `error` and the unhandled event crashes the whole process. `withTenant` listens while it holds the client; keep that when porting it. Also add `pool.on('error', log)` for idle clients ([connection-loss.test.ts](../../verify/tests/connection-loss.test.ts)).
+- Holding a pooled client with no `error` listener. If Postgres ends the connection between two queries (a failover, or `idle_in_transaction_session_timeout` while the request calls something slow), node-postgres emits `error` and the unhandled event crashes the whole process. `withTenant` listens while it holds the client; keep that when porting it. Also add `pool.on('error', log)` for idle clients ([connection-loss.test.ts](../../verify/tests/invariants/connection-loss.test.ts)).
 - `SET LOCAL hnsw.iterative_scan` on pgvector 0.5–0.7 (still common on managed hosts). Once the library is loaded, `hnsw.` is a reserved prefix, so the statement fails on every *reused* pooled connection and aborts the transaction: an intermittent outage. Set it only when `pg_settings` has it, as `hybridSearch()` does.

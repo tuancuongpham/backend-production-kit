@@ -1,6 +1,6 @@
 import { describe, it } from 'node:test';
 import assert from 'node:assert/strict';
-import { createRedactor, luhnValid, pinoRedactionOptions } from '../../skills/pii-redaction/references/redact.ts';
+import { createRedactor, luhnValid, pinoRedactionOptions } from '../../../skills/pii-redaction/references/redact.ts';
 
 const r = createRedactor();
 

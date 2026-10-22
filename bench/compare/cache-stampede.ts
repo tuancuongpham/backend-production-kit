@@ -7,7 +7,7 @@
 // Run inside the Docker network:  npm run bench:docker -- bench/compare/cache-stampede.ts
 import { setTimeout as sleep } from 'node:timers/promises';
 import { Redis } from 'ioredis';
-import { REDIS_URL } from '../../verify/tests/helpers.ts';
+import { REDIS_URL } from '../../verify/tests/support/infra.ts';
 import { createCache } from '../../skills/cache-stampede/references/cache.ts';
 import { save, stats, table } from './lib.ts';
 

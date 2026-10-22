@@ -5,7 +5,7 @@
 // Measured on Windows 11 + Docker Desktop: from the host, every message >= 16 KB costs ~44 ms
 // (a 1536-dim embedding sent as text is 15–31 KB); inside the network the same queries take 0.2–0.5 ms.
 import pg from 'pg';
-import { ADMIN_URL } from '../../verify/tests/helpers.ts';
+import { ADMIN_URL } from '../../verify/tests/support/infra.ts';
 import { save } from './lib.ts';
 
 const client = new pg.Client({ connectionString: ADMIN_URL });

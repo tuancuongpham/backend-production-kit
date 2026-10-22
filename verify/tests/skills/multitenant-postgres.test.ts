@@ -1,8 +1,9 @@
 import { after, before, describe, it } from 'node:test';
 import assert from 'node:assert/strict';
 import pg from 'pg';
-import { fakeEmbedding, freshDatabase, readSkillFile, runSqlFile, toVectorLiteral, withUser } from './helpers.ts';
-import { hybridSearch, withTenant } from '../../skills/multitenant-postgres/references/tenant-db.ts';
+import { freshDatabase, readSkillFile, runSqlFile, withUser } from '../support/infra.ts';
+import { fakeEmbedding, toVectorLiteral } from '../support/vectors.ts';
+import { hybridSearch, withTenant } from '../../../skills/multitenant-postgres/references/tenant-db.ts';
 
 const A = '11111111-1111-4111-8111-111111111111';
 const B = '22222222-2222-4222-8222-222222222222';

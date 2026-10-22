@@ -6,7 +6,7 @@
 // Run inside the Docker network:  npm run bench:docker -- bench/compare/rate-limiter.ts
 import { readFileSync } from 'node:fs';
 import { Redis } from 'ioredis';
-import { REDIS_URL } from '../../verify/tests/helpers.ts';
+import { REDIS_URL } from '../../verify/tests/support/infra.ts';
 import { createRateLimiter } from '../../skills/rate-limiting/references/limiter.ts';
 import { save, table, throughput } from './lib.ts';
 

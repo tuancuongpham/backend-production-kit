@@ -1,8 +1,8 @@
 import { after, before, beforeEach, describe, it } from 'node:test';
 import assert from 'node:assert/strict';
 import pg from 'pg';
-import { freshDatabase, runSqlFile } from './helpers.ts';
-import { createToolGuard, type ToolDef } from '../../skills/llm-tool-safety/references/tool-guard.ts';
+import { freshDatabase, runSqlFile } from '../support/infra.ts';
+import { createToolGuard, type ToolDef } from '../../../skills/llm-tool-safety/references/tool-guard.ts';
 
 let pool: pg.Pool;
 let guard: ReturnType<typeof createToolGuard>;

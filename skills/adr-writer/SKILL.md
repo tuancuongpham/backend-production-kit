@@ -30,7 +30,7 @@ Write one when a choice has **real alternatives and lasting consequences**: data
 5. **Public write-up** (project #15) ([assets/writeup-template.md](assets/writeup-template.md)): problem first, a Mermaid architecture diagram, a key-decisions table linking ADRs, numbers linked to benchmark reports, and an honest "what went wrong" section. Strip customer names, secrets, internal hostnames and anything under NDA before publishing, and ask the user to confirm that.
 
 ## Verification
-[verify/tests/adr-writer.test.ts](../../verify/tests/adr-writer.test.ts): sequential numbering, Vietnamese slugs, no unfilled `{{placeholders}}`, supersession links both ways, index regenerated with statuses.
+[verify/tests/skills/adr-writer.test.ts](../../verify/tests/skills/adr-writer.test.ts): sequential numbering, Vietnamese slugs, no unfilled `{{placeholders}}`, supersession links both ways, index regenerated with statuses.
 
 For content quality, re-read the finished ADR and check: does each option have a real con? Is there a number in Context? Does Verification name something runnable? Is there at least one concrete revisit trigger?
 

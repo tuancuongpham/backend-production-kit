@@ -40,7 +40,7 @@ SLO (objective, error ratio as PromQL)
    hand.
 3. **Test the rules in CI with promtool** (`promtool check rules`, then `promtool test rules` with synthetic
    series). This is what proves the PromQL fires when you think it does.
-   [The test](../../verify/tests/slo-alerting.test.ts) runs promtool from the official image.
+   [The test](../../verify/tests/skills/slo-alerting.test.ts) runs promtool from the official image.
 4. **Check incident sizes before they happen.** `simulate(objective, minutes)` replays per-minute traffic and
    reports when each alert would fire. Use it to check that a realistic incident (say 5% errors) pages in time, and
    that last month's noise wouldn't have.
@@ -52,7 +52,7 @@ SLO (objective, error ratio as PromQL)
 
 ## Verification (required)
 
-[verify/tests/slo-alerting.test.ts](../../verify/tests/slo-alerting.test.ts) covers:
+[verify/tests/skills/slo-alerting.test.ts](../../verify/tests/skills/slo-alerting.test.ts) covers:
 - **A 10% error rate on a 99.9% SLO pages within 9 minutes.** The 6-hour page follows at 22 minutes and the ticket
   at 44 (after three quiet days of history).
 - **A slow burn (0.2% errors, twice the sustainable rate) never pages**, and opens a ticket after 36 hours.

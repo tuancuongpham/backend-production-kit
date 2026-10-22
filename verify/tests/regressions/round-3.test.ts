@@ -9,33 +9,28 @@ import pg from 'pg';
 import type { Redis } from 'ioredis';
 import { Redis as RedisClient } from 'ioredis';
 import { BasicTracerProvider, InMemorySpanExporter, SimpleSpanProcessor } from '@opentelemetry/sdk-trace-base';
-import { freshDatabase, readSkillFile, REDIS_URL, runSqlFile, sleep } from './helpers.ts';
-import * as webhooks from '../../skills/webhook-ingestion/references/webhooks.ts';
-import * as gw from '../../skills/llm-gateway/references/gateway.ts';
-import * as toolGuard from '../../skills/llm-tool-safety/references/tool-guard.ts';
-import * as idem from '../../skills/idempotency-keys/references/idempotency.ts';
-import * as jobs from '../../skills/job-queue/references/jobs.ts';
-import * as erasure from '../../skills/data-retention-and-erasure/references/erasure.ts';
-import * as agentDb from '../../skills/agent-safe-db/references/agent-db-tool.ts';
-import * as limiter from '../../skills/rate-limiting/references/limiter.ts';
-import * as cache from '../../skills/cache-stampede/references/cache.ts';
-import * as sse from '../../skills/sse-streaming/references/sse.ts';
-import * as evals from '../../skills/rag-evals/references/retrieval-eval.ts';
-import * as judge from '../../skills/rag-evals/references/judge.ts';
-import * as tracing from '../../skills/llm-observability/references/llm-tracing.ts';
-import * as redaction from '../../skills/pii-redaction/references/redact.ts';
-import * as migrate from '../../skills/zero-downtime-migrations/references/migrate.ts';
-import * as lint from '../../skills/zero-downtime-migrations/references/lint.ts';
+import { freshDatabase, readSkillFile, REDIS_URL, runSqlFile } from '../support/infra.ts';
+import { sleep, waitFor } from '../support/wait.ts';
+import * as webhooks from '../../../skills/webhook-ingestion/references/webhooks.ts';
+import * as gw from '../../../skills/llm-gateway/references/gateway.ts';
+import * as toolGuard from '../../../skills/llm-tool-safety/references/tool-guard.ts';
+import * as idem from '../../../skills/idempotency-keys/references/idempotency.ts';
+import * as jobs from '../../../skills/job-queue/references/jobs.ts';
+import * as erasure from '../../../skills/data-retention-and-erasure/references/erasure.ts';
+import * as agentDb from '../../../skills/agent-safe-db/references/agent-db-tool.ts';
+import * as limiter from '../../../skills/rate-limiting/references/limiter.ts';
+import * as cache from '../../../skills/cache-stampede/references/cache.ts';
+import * as sse from '../../../skills/sse-streaming/references/sse.ts';
+import * as evals from '../../../skills/rag-evals/references/retrieval-eval.ts';
+import * as judge from '../../../skills/rag-evals/references/judge.ts';
+import * as tracing from '../../../skills/llm-observability/references/llm-tracing.ts';
+import * as redaction from '../../../skills/pii-redaction/references/redact.ts';
+import * as migrate from '../../../skills/zero-downtime-migrations/references/migrate.ts';
+import * as lint from '../../../skills/zero-downtime-migrations/references/lint.ts';
 
 let dbUrl: string;
 let pool: pg.Pool;
 const count = async (sql: string, params: unknown[] = []) => (await pool.query(sql, params)).rows[0].n as number;
-/** Waits for a state instead of guessing a duration: CI runners are slower than laptops in unpredictable ways. */
-const waitFor = async (check: () => boolean, what: string) => {
-  for (const deadline = Date.now() + 5000; !check(); await sleep(10)) {
-    if (Date.now() > deadline) throw new Error(`timed out waiting for ${what}`);
-  }
-};
 
 describe('latent bugs, round 3', () => {
   before(async () => {

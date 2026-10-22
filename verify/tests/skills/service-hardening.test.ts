@@ -1,8 +1,8 @@
 import { describe, it } from 'node:test';
 import assert from 'node:assert/strict';
 import { once } from 'node:events';
-import { sleep } from './helpers.ts';
-import { createHardenedServer, readBody } from '../../skills/service-hardening/references/server.ts';
+import { sleep } from '../support/wait.ts';
+import { createHardenedServer, readBody } from '../../../skills/service-hardening/references/server.ts';
 
 function app(extra: Partial<Parameters<typeof createHardenedServer>[0]> = {}) {
   const aborted: string[] = [];

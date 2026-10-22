@@ -36,13 +36,13 @@ The full go-live list is in [references/checklist.md](references/checklist.md).
 
 ## Verification (required)
 
-[verify/tests/service-hardening.test.ts](../../verify/tests/service-hardening.test.ts):
+[verify/tests/skills/service-hardening.test.ts](../../verify/tests/skills/service-hardening.test.ts):
 - Shutdown during 3 in-flight slow requests → all 3 return 200; `/readyz` returns 503 and new work returns 503 during the drain; the listener is closed afterwards; `forced: false`.
 - A straggler beyond the grace period → shutdown still completes within the bound (`forced: true`) and the hooks still run.
 - `maxInFlight: 2` with 5 concurrent → exactly two 200s and three 503s, and the 503s are immediate (< 150 ms).
 - Client abort → the handler's signal fires, with the request id preserved.
 - Handler throws → 500, the server keeps serving; oversize body → 413; malformed incoming request ids are replaced.
-- A 32 MB upload, chunked or with a declared `Content-Length`, gets a 413 response (not a reset), and the server reads less than 8 MB of it ([latent-bugs-round2.test.ts](../../verify/tests/latent-bugs-round2.test.ts)).
+- A 32 MB upload, chunked or with a declared `Content-Length`, gets a 413 response (not a reset), and the server reads less than 8 MB of it ([regressions/round-2.test.ts](../../verify/tests/regressions/round-2.test.ts)).
 - Readiness follows dependency checks while liveness doesn't.
 
 Then **load-test** the real service (k6/autocannon) at 2× expected peak. Record p50/p95/p99, error rate and the in-flight cap where shedding starts; the `adr-writer` benchmark template has the format. Finally, do a rolling deploy under load and confirm zero 5xx caused by the deploy.

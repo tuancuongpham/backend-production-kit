@@ -33,15 +33,15 @@ Reference: [references/sse.ts](references/sse.ts).
 
 ## Verification (required)
 
-[verify/tests/sse-streaming.test.ts](../../verify/tests/sse-streaming.test.ts), real HTTP:
+[verify/tests/skills/sse-streaming.test.ts](../../verify/tests/skills/sse-streaming.test.ts), real HTTP:
 - Correct headers; tokens (including multi-line data) arrive in order, followed by `done`.
 - A client disconnecting after 2 tokens stops the upstream generator (its `finally` runs).
 - Reconnect with the id of the first event → receives exactly the next two, including one published *while* connected.
-- A `Last-Event-ID` from before a restart → `reset`, not the new process's events ([latent-bugs-round3.test.ts](../../verify/tests/latent-bugs-round3.test.ts)).
+- A `Last-Event-ID` from before a restart → `reset`, not the new process's events ([regressions/round-3.test.ts](../../verify/tests/regressions/round-3.test.ts)).
 - A client older than the replay buffer gets `reset`, not a gap.
 - Heartbeat comments arrive.
 - A stalled client (never reads) makes `trySend` refuse, and the buffered bytes stay bounded.
-- A stalled feed subscriber is disconnected once it is `maxQueue` events behind, instead of buffering every event ([latent-bugs-round2.test.ts](../../verify/tests/latent-bugs-round2.test.ts)).
+- A stalled feed subscriber is disconnected once it is `maxQueue` events behind, instead of buffering every event ([regressions/round-2.test.ts](../../verify/tests/regressions/round-2.test.ts)).
 
 Manually: throttle the network in browser devtools and toggle offline; the UI should resume without duplicate or missing tokens. Behind the real proxy or CDN, confirm tokens arrive incrementally rather than all at once at the end (a buffering proxy).
 

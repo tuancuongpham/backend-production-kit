@@ -84,7 +84,7 @@ mẫu (nhiều cái là sự cố production kinh điển), nay đã sửa và c
 | Circuit breaker của một dependency hết thời gian chờ | mọi request đang đợi cùng gọi vào dependency vẫn còn chết: **10 lần gọi thay vì 1 lần thăm dò** | có trạng thái half-open thật, dùng chung cho gateway, rate limiter và cache |
 
 Vòng rà soát gần nhất đặt ra 34 giả thuyết về chỗ có thể hỏng và viết mỗi giả thuyết thành một test. Cả 34 đều fail
-trên bản phát hành trước, và đều đã được sửa ([`latent-bugs-round3.test.ts`](../../verify/tests/latent-bugs-round3.test.ts)).
+trên bản phát hành trước, và đều đã được sửa ([`regressions/round-3.test.ts`](../../verify/tests/regressions/round-3.test.ts)).
 
 ## Đã được test với các sự cố thật
 

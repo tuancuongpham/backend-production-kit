@@ -1,6 +1,6 @@
 # Same checklist in Go (net/http)
 
-Not covered by the kit's automated tests. It's here so the skill stays useful in Go services; verify it with the same scenarios as `verify/tests/service-hardening.test.ts` (in-flight requests finish during SIGTERM, 503 beyond the concurrency cap, client disconnect cancels `r.Context()`).
+Not covered by the kit's automated tests. It's here so the skill stays useful in Go services; verify it with the same scenarios as `verify/tests/skills/service-hardening.test.ts` (in-flight requests finish during SIGTERM, 503 beyond the concurrency cap, client disconnect cancels `r.Context()`).
 
 ```go
 package main

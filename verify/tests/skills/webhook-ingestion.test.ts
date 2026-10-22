@@ -2,7 +2,7 @@ import { after, before, beforeEach, describe, it } from 'node:test';
 import assert from 'node:assert/strict';
 import { createHmac } from 'node:crypto';
 import pg from 'pg';
-import { freshDatabase, runSqlFile } from './helpers.ts';
+import { freshDatabase, runSqlFile } from '../support/infra.ts';
 import {
   backoffMs,
   createInboxWorker,
@@ -12,7 +12,7 @@ import {
   verifyHmacHex,
   verifyTimestampedSignature,
   type Handler,
-} from '../../skills/webhook-ingestion/references/webhooks.ts';
+} from '../../../skills/webhook-ingestion/references/webhooks.ts';
 
 let pool: pg.Pool;
 

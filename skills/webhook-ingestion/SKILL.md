@@ -55,14 +55,14 @@ replay CLI → dead → pending          reconcile cron → provider API → ing
 
 ## Verification (required)
 
-Against real Postgres. [verify/tests/webhook-ingestion.test.ts](../../verify/tests/webhook-ingestion.test.ts) and the regression tests in [latent-bugs-round2.test.ts](../../verify/tests/latent-bugs-round2.test.ts) cover:
+Against real Postgres. [verify/tests/skills/webhook-ingestion.test.ts](../../verify/tests/skills/webhook-ingestion.test.ts) and the regression tests in [regressions/round-2.test.ts](../../verify/tests/regressions/round-2.test.ts) cover:
 - Signatures: valid passes; tampered body, wrong secret, stale timestamp, missing or malformed header, and wrong-length hex all fail.
 - The same event delivered twice → 1 row, handler effect applied once, including when the duplicate arrives *after* processing.
 - A handler that writes then throws → the write is rolled back; status `pending`, `attempts` 1, `next_attempt_at` in the future; not re-run before due; eventually `done`.
 - After `maxAttempts` → `dead`, `onDead` fires, the DLQ view shows it; `replay` → processed successfully.
 - 4 concurrent workers × 60 events → exactly 60 effects, all `done`.
 - A row stuck in `processing` with an old `locked_at` is re-claimed. One claim takes the stuck row and due rows, never more than `batchSize` in total. Unknown event type → acknowledged as `ignored`.
-- A handler slower than `stuckAfterSec` while a second worker polls → credited once, not twice. A worker whose connection died after another worker took over the event → `lost`, and the event stays `done` ([latent-bugs-round3.test.ts](../../verify/tests/latent-bugs-round3.test.ts)).
+- A handler slower than `stuckAfterSec` while a second worker polls → credited once, not twice. A worker whose connection died after another worker took over the event → `lost`, and the event stays `done` ([regressions/round-3.test.ts](../../verify/tests/regressions/round-3.test.ts)).
 - `run()` with 4 loops processes 4 events at once; aborting it mid-batch leaves no row in `processing`, and a restart drains the rest with each event applied once.
 - Reconciliation ingests only missing events and reports the count. `pruneInbox` deletes old `done` rows only, never recent ones or dead letters.
 

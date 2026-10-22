@@ -8,7 +8,7 @@
 // the same way (binary vectorParam), so latencies differ only by the query.
 // Run inside the Docker network:  npm run bench:docker -- bench/compare/semantic-cache.ts
 import pg from 'pg';
-import { freshDatabase, runSqlFile } from '../../verify/tests/helpers.ts';
+import { freshDatabase, runSqlFile } from '../../verify/tests/support/infra.ts';
 import { pgCache, vectorParam } from '../../skills/llm-gateway/references/pg-stores.ts';
 import { latency, near, planSummary, randomVector, save, table, vectorLiteral } from './lib.ts';
 

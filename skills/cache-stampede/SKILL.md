@@ -60,7 +60,7 @@ get(key, load)
 
 ## Verification (required)
 
-Against real Redis. [verify/tests/cache-stampede.test.ts](../../verify/tests/cache-stampede.test.ts) covers:
+Against real Redis. [verify/tests/skills/cache-stampede.test.ts](../../verify/tests/skills/cache-stampede.test.ts) covers:
 - 100 concurrent misses in one process → **one origin call**.
 - **Three instances × 30 concurrent misses → one origin call** across all of them.
 - Once stale, 20 callers get the old value in under 100 ms while a single 200 ms refresh runs; afterwards they get
@@ -70,7 +70,7 @@ Against real Redis. [verify/tests/cache-stampede.test.ts](../../verify/tests/cac
 - An instance that died holding the lock blocks the others for `waitMs` only.
 - Redis down → requests reach the origin, still one call per key per process, and the outage is reported.
 - Jittered TTLs are spread over more than a second; `null` results are cached; keys carry the tenant.
-- [latent-bugs-round3.test.ts](../../verify/tests/latent-bugs-round3.test.ts): a hit deep-equals the miss that filled
+- [regressions/round-3.test.ts](../../verify/tests/regressions/round-3.test.ts): a hit deep-equals the miss that filled
   it (a `Date` field included); a `BigInt` value is served uncached; 20 requests against a black-holed Redis take
   181 ms in total, against 1,236 ms without the breaker.
 

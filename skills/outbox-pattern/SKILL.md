@@ -36,7 +36,7 @@ This is also how to keep slow AI work off the request path. The request writes `
 
 ## Verification (required)
 
-[verify/tests/outbox-pattern.test.ts](../../verify/tests/outbox-pattern.test.ts):
+[verify/tests/skills/outbox-pattern.test.ts](../../verify/tests/skills/outbox-pattern.test.ts):
 - Business transaction rolls back → no outbox row; commits → exactly one.
 - Relay publishes once and marks; a second run publishes nothing.
 - Broker fails on message 2 of 3 → only 1 published, 2 keeps `attempts`/`last_error`, 3 doesn't overtake; after recovery the order is 1, 2, 3.
@@ -44,8 +44,8 @@ This is also how to keep slow AI work off the request path. The request writes `
 - Consumer throws → the dedup mark rolls back → a retry applies.
 - Two relays at once → one backs off, nothing is published twice.
 - `run()` drains a backlog of 25 in batches of 10, then picks up a message written later, until stopped; each is published once.
-- A publish that never returns → `relayOnce` gives up after `publishTimeoutMs`, records the error on that message, and releases the lock, so the next run can proceed ([latent-bugs-round2.test.ts](../../verify/tests/latent-bugs-round2.test.ts)).
-- Postgres goes away (through Toxiproxy) right after the first of 3 publishes → once the relay's connection has noticed, `relayOnce` rejects without publishing the other two; after recovery all 3 go out, and only the first was sent twice ([resilience-testing.test.ts](../../verify/tests/resilience-testing.test.ts)). Before the fix, all 3 were sent twice.
+- A publish that never returns → `relayOnce` gives up after `publishTimeoutMs`, records the error on that message, and releases the lock, so the next run can proceed ([regressions/round-2.test.ts](../../verify/tests/regressions/round-2.test.ts)).
+- Postgres goes away (through Toxiproxy) right after the first of 3 publishes → once the relay's connection has noticed, `relayOnce` rejects without publishing the other two; after recovery all 3 go out, and only the first was sent twice ([resilience-testing.test.ts](../../verify/tests/skills/resilience-testing.test.ts)). Before the fix, all 3 were sent twice.
 
 In a staging environment, also kill the relay process mid-batch (`kill -9`) and confirm the lag recovers with no gaps at the consumer.
 

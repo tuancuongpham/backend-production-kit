@@ -42,15 +42,15 @@ LLM *token or cost* budgets are a separate concern; see the `llm-gateway` skill.
 
 ## Verification (required)
 
-[verify/tests/rate-limiting.test.ts](../../verify/tests/rate-limiting.test.ts), against real Redis:
+[verify/tests/skills/rate-limiting.test.ts](../../verify/tests/skills/rate-limiting.test.ts), against real Redis:
 - A burst of capacity + 1 → the last one is denied with `retryAfterMs` > 0 and a `Retry-After` header.
 - Tokens refill after waiting. Subjects are isolated. Cost > 1 works.
 - **Atomicity**: 90 concurrent checks from 3 separate clients (≈ 3 app instances) against capacity 20 → exactly 20 allowed.
 - **Slow Redis** (server blocked by a busy script): the check falls back within `timeoutMs`, and *no unhandled rejection* surfaces afterwards. This test catches the classic `Promise.race` crash; it fails without the `.catch`.
 - **Redis down**: `closed` → denied in < 300 ms; `open` → allowed; `local` → enforces `capacity / instances`.
-- Breaker: after the threshold, Redis isn't called any more. After the cooldown, 20 concurrent checks send 1 probe to a dead Redis, not 20, and all 20 answer within the probe's timeout ([latent-bugs-round3.test.ts](../../verify/tests/latent-bugs-round3.test.ts)).
-- Through Toxiproxy, Redis 300 ms slow against `timeoutMs: 50` → the check falls back to `local` in under 150 ms, and is back on `redis` once the latency is gone ([resilience-testing.test.ts](../../verify/tests/resilience-testing.test.ts)).
-- Config: `refillPerSec: 0`, `capacity: 0` and `NaN` are rejected at startup. With refill 0 the Lua script itself errors on every call ([latent-bugs-round2.test.ts](../../verify/tests/latent-bugs-round2.test.ts)).
+- Breaker: after the threshold, Redis isn't called any more. After the cooldown, 20 concurrent checks send 1 probe to a dead Redis, not 20, and all 20 answer within the probe's timeout ([regressions/round-3.test.ts](../../verify/tests/regressions/round-3.test.ts)).
+- Through Toxiproxy, Redis 300 ms slow against `timeoutMs: 50` → the check falls back to `local` in under 150 ms, and is back on `redis` once the latency is gone ([resilience-testing.test.ts](../../verify/tests/skills/resilience-testing.test.ts)).
+- Config: `refillPerSec: 0`, `capacity: 0` and `NaN` are rejected at startup. With refill 0 the Lua script itself errors on every call ([regressions/round-2.test.ts](../../verify/tests/regressions/round-2.test.ts)).
 
 Before launch, load-test the real endpoint (k6/autocannon) to confirm limiter latency at p99 and that 429s don't cascade into client retry storms.
 

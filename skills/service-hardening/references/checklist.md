@@ -10,7 +10,7 @@ Tick each item, or write down why it doesn't apply. Items marked 🧪 should hav
 - [ ] Every outbound call has a deadline; retries are bounded with jittered backoff and only for idempotent operations
 - [ ] 🧪 Postgres pool: `connectionTimeoutMillis` (without it, a connect to a black-holed database waits forever) and a
   client-side `query_timeout`. A server-side `statement_timeout` limits server work, not a slow network
-  ([`resilience-testing.test.ts`](../../../verify/tests/resilience-testing.test.ts))
+  ([`resilience-testing.test.ts`](../../../verify/tests/skills/resilience-testing.test.ts))
 - [ ] Per-tenant / per-user rate limits (see `rate-limiting`)
 
 ## Lifecycle
@@ -23,7 +23,7 @@ Tick each item, or write down why it doesn't apply. Items marked 🧪 should hav
   connection: `pool.on('error', log)` covers idle pooled clients, and every checked-out client needs a listener
   for as long as it is held (the kit's reference functions add one). With neither, one `pg_terminate_backend` or
   `idle_in_transaction_session_timeout` exits the process with every in-flight request
-  ([`connection-loss.test.ts`](../../../verify/tests/connection-loss.test.ts))
+  ([`connection-loss.test.ts`](../../../verify/tests/invariants/connection-loss.test.ts))
 - [ ] Retried writes are idempotent: `Idempotency-Key` on create/charge/send endpoints (see `idempotency-keys`)
 
 ## Observability

@@ -7,10 +7,10 @@ import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { promisify } from 'node:util';
 // @ts-ignore — plain JS module
-import { fillTemplate, slugify } from '../../skills/adr-writer/scripts/new-adr.mjs';
+import { fillTemplate, slugify } from '../../../skills/adr-writer/scripts/new-adr.mjs';
 
 const run = promisify(execFile);
-const script = fileURLToPath(new URL('../../skills/adr-writer/scripts/new-adr.mjs', import.meta.url));
+const script = fileURLToPath(new URL('../../../skills/adr-writer/scripts/new-adr.mjs', import.meta.url));
 
 describe('adr-writer', () => {
   it('fills the template with the title exactly as typed', () => {

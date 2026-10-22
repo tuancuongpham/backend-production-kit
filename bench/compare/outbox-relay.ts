@@ -6,7 +6,7 @@
 // re-publishes the whole batch either way (consumers dedup by message id).
 // Run inside the Docker network:  npm run bench:docker -- bench/compare/outbox-relay.ts
 import pg from 'pg';
-import { freshDatabase, runSqlFile } from '../../verify/tests/helpers.ts';
+import { freshDatabase, runSqlFile } from '../../verify/tests/support/infra.ts';
 import { createRelay } from '../../skills/outbox-pattern/references/outbox.ts';
 import { save, table } from './lib.ts';
 

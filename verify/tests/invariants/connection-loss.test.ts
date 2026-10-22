@@ -6,11 +6,12 @@
 import { after, before, describe, it } from 'node:test';
 import assert from 'node:assert/strict';
 import pg from 'pg';
-import { freshDatabase, runSqlFile, sleep } from './helpers.ts';
-import { withTenant } from '../../skills/multitenant-postgres/references/tenant-db.ts';
-import { consumeOnce, createRelay, enqueue } from '../../skills/outbox-pattern/references/outbox.ts';
-import { createInboxWorker, ingest } from '../../skills/webhook-ingestion/references/webhooks.ts';
-import { requestFingerprint, runIdempotent } from '../../skills/idempotency-keys/references/idempotency.ts';
+import { freshDatabase, runSqlFile } from '../support/infra.ts';
+import { sleep } from '../support/wait.ts';
+import { withTenant } from '../../../skills/multitenant-postgres/references/tenant-db.ts';
+import { consumeOnce, createRelay, enqueue } from '../../../skills/outbox-pattern/references/outbox.ts';
+import { createInboxWorker, ingest } from '../../../skills/webhook-ingestion/references/webhooks.ts';
+import { requestFingerprint, runIdempotent } from '../../../skills/idempotency-keys/references/idempotency.ts';
 
 let pool: pg.Pool;
 

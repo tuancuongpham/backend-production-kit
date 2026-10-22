@@ -1,8 +1,9 @@
 import { after, before, describe, it } from 'node:test';
 import assert from 'node:assert/strict';
 import { Redis } from 'ioredis';
-import { REDIS_URL, sleep } from './helpers.ts';
-import { createRateLimiter, rateLimitHeaders } from '../../skills/rate-limiting/references/limiter.ts';
+import { REDIS_URL } from '../support/infra.ts';
+import { sleep } from '../support/wait.ts';
+import { createRateLimiter, rateLimitHeaders } from '../../../skills/rate-limiting/references/limiter.ts';
 
 const opts = { enableOfflineQueue: false, maxRetriesPerRequest: 1, commandTimeout: 200, lazyConnect: true };
 const run = `t${Date.now()}`; // unique key space per test run

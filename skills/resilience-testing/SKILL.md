@@ -51,7 +51,7 @@ assert: fails fast · falls back · loses nothing · recovers without a restart
 
 ## Verification (required)
 
-[verify/tests/resilience-testing.test.ts](../../verify/tests/resilience-testing.test.ts) runs the kit's own
+[verify/tests/skills/resilience-testing.test.ts](../../verify/tests/skills/resilience-testing.test.ts) runs the kit's own
 reference code through Toxiproxy:
 - **Slow network (1 s latency).** A server-side `statement_timeout` of 300 ms never fires: the query is instant,
   and the reply waited the full second. A client-side `query_timeout` of 300 ms failed the call in under 600 ms.

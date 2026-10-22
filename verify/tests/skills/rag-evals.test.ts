@@ -1,8 +1,9 @@
 import { after, before, describe, it } from 'node:test';
 import assert from 'node:assert/strict';
 import pg from 'pg';
-import { fakeEmbedding, freshDatabase, runSqlFile, toVectorLiteral } from './helpers.ts';
-import { hybridSearch, withTenant } from '../../skills/multitenant-postgres/references/tenant-db.ts';
+import { freshDatabase, runSqlFile } from '../support/infra.ts';
+import { fakeEmbedding, toVectorLiteral } from '../support/vectors.ts';
+import { hybridSearch, withTenant } from '../../../skills/multitenant-postgres/references/tenant-db.ts';
 import {
   compareReports,
   evaluateRetriever,
@@ -12,9 +13,9 @@ import {
   reciprocalRank,
   toMarkdown,
   type GoldenQuery,
-} from '../../skills/rag-evals/references/retrieval-eval.ts';
-import { cohensKappa, fillPrompt, judgeAgreement, runJudge, type JudgeCase } from '../../skills/rag-evals/references/judge.ts';
-import { CHUNKS, KEYWORD_QUERIES, TENANT } from './fixtures/help-center.ts';
+} from '../../../skills/rag-evals/references/retrieval-eval.ts';
+import { cohensKappa, fillPrompt, judgeAgreement, runJudge, type JudgeCase } from '../../../skills/rag-evals/references/judge.ts';
+import { CHUNKS, KEYWORD_QUERIES, TENANT } from '../fixtures/help-center.ts';
 
 const golden: GoldenQuery[] = KEYWORD_QUERIES;
 

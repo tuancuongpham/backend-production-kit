@@ -5,7 +5,8 @@
 //   C. shipped               advisory try-lock + claim in one statement; duplicates get 409 at once
 // Run inside the Docker network:  npm run bench:docker -- bench/compare/idempotency.ts
 import pg from 'pg';
-import { freshDatabase, runSqlFile, sleep } from '../../verify/tests/helpers.ts';
+import { freshDatabase, runSqlFile } from '../../verify/tests/support/infra.ts';
+import { sleep } from '../../verify/tests/support/wait.ts';
 import {
   IdempotencyError,
   requestFingerprint,

@@ -100,14 +100,14 @@ app.post('/orders', async (req, res) => {
 
 ## Verification (required)
 
-Against real Postgres. [verify/tests/idempotency-keys.test.ts](../../verify/tests/idempotency-keys.test.ts) covers:
+Against real Postgres. [verify/tests/skills/idempotency-keys.test.ts](../../verify/tests/skills/idempotency-keys.test.ts) covers:
 - Same key twice → one order. The retry gets the identical status, body and headers, marked as a replay.
 - **20 concurrent requests with one key → the handler runs once.** The others get 409 without waiting for the first
   (300 ms) to finish, and a later retry replays.
 - Same key with a different body, or on another route → 422, and nothing runs.
 - A handler that throws → the order rolls back, no key remains, and the retry runs once.
 - **The connection killed right after the order insert** (the app server dying) → no order, no key; the retry runs
-  once. [connection-loss.test.ts](../../verify/tests/connection-loss.test.ts) also checks that this fails the request,
+  once. [connection-loss.test.ts](../../verify/tests/invariants/connection-loss.test.ts) also checks that this fails the request,
   not the process.
 - Keys are scoped per caller. An expired key runs again. Pruning deletes 2,500 expired keys in batches and keeps live
   ones.
@@ -117,7 +117,7 @@ Against real Postgres. [verify/tests/idempotency-keys.test.ts](../../verify/test
     request can't take its claim over;
   - a failed call releases the key, and the retry sends the same downstream key;
   - a request whose stale claim was taken over fails later → the new owner's claim stays, and a third retry gets
-    409 instead of charging again ([latent-bugs-round3.test.ts](../../verify/tests/latent-bugs-round3.test.ts)).
+    409 instead of charging again ([regressions/round-3.test.ts](../../verify/tests/regressions/round-3.test.ts)).
 - Keys are parsed strictly and fingerprints are canonical.
 
 How to write these tests so they prove something:

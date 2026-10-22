@@ -1,8 +1,9 @@
 import { after, before, beforeEach, describe, it } from 'node:test';
 import assert from 'node:assert/strict';
 import pg from 'pg';
-import { freshDatabase, runSqlFile } from './helpers.ts';
-import { consumeOnce, createRelay, enqueue, type OutboxMessage } from '../../skills/outbox-pattern/references/outbox.ts';
+import { freshDatabase, runSqlFile } from '../support/infra.ts';
+import { waitFor } from '../support/wait.ts';
+import { consumeOnce, createRelay, enqueue, type OutboxMessage } from '../../../skills/outbox-pattern/references/outbox.ts';
 
 let pool: pg.Pool;
 
@@ -120,12 +121,9 @@ describe('outbox-pattern', () => {
     const sent: string[] = [];
     const ac = new AbortController();
     const running = createRelay({ pool, publish: async (m) => void sent.push(m.id), batchSize: 10 }).run({ signal: ac.signal, idleMs: 20 });
-    const waitFor = async (n: number) => {
-      for (let t = Date.now(); sent.length < n && Date.now() - t < 2000; ) await new Promise((r) => setTimeout(r, 10));
-    };
-    await waitFor(25);
+    await waitFor(() => sent.length >= 25, 'the backlog');
     await placeOrder('late');
-    await waitFor(26);
+    await waitFor(() => sent.length >= 26, 'the late message');
     ac.abort();
     await running;
     assert.equal(sent.length, 26);

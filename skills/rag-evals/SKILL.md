@@ -58,7 +58,7 @@ golden set (real queries → relevant chunk ids, tagged by type)
 
 ## Verification (required)
 
-[verify/tests/rag-evals.test.ts](../../verify/tests/rag-evals.test.ts) covers:
+[verify/tests/skills/rag-evals.test.ts](../../verify/tests/skills/rag-evals.test.ts) covers:
 - Metrics on hand-checked rankings (recall@k, precision, MRR, nDCG).
 - **A real regression caught on Postgres hybrid search** (`multitenant-postgres`), on a 12-chunk Vietnamese help
   center:
@@ -69,7 +69,7 @@ golden set (real queries → relevant chunk ids, tagged by type)
 - Cohen's kappa on worked examples.
 - A cheap judge that looks 83% accurate has a kappa of only 0.57 and passed "every order ships free". The agreement
   report shows it before anyone gates on it.
-- [latent-bugs-round3.test.ts](../../verify/tests/latent-bugs-round3.test.ts): a retriever returning one document
+- [regressions/round-3.test.ts](../../verify/tests/regressions/round-3.test.ts): a retriever returning one document
   twice scores recall 1, not 2; adding a hard question to the golden set passes the gate; an answer containing
   `$&`, `$'` or `{{context}}` reaches the judge prompt as written.
 

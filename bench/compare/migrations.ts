@@ -7,7 +7,7 @@
 // Run inside the Docker network:  npm run bench:docker -- bench/compare/migrations.ts
 import { setTimeout as sleep } from 'node:timers/promises';
 import pg from 'pg';
-import { freshDatabase } from '../../verify/tests/helpers.ts';
+import { freshDatabase } from '../../verify/tests/support/infra.ts';
 import { runStep } from '../../skills/zero-downtime-migrations/references/migrate.ts';
 import { save, table } from './lib.ts';
 

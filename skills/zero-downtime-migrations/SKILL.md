@@ -53,7 +53,7 @@ against traffic.
 
 ## Verification (required)
 
-Against real Postgres. [verify/tests/zero-downtime-migrations.test.ts](../../verify/tests/zero-downtime-migrations.test.ts) covers:
+Against real Postgres. [verify/tests/skills/zero-downtime-migrations.test.ts](../../verify/tests/skills/zero-downtime-migrations.test.ts) covers:
 - **A waiting `ALTER` stalls reads**: behind a 700 ms report, a read waited over 500 ms. With `runStep` and
   `lock_timeout` 100 ms, a read waited under 250 ms, and the step retried until the report ended.
 - `CREATE INDEX` makes an insert wait through most of the build. With `CONCURRENTLY`, the insert takes under 100 ms.
@@ -70,7 +70,7 @@ Against real Postgres. [verify/tests/zero-downtime-migrations.test.ts](../../ver
 - `backfill` updates in batches, and an interrupted run resumes with only the rows still to do.
 - The linter flags each hazard in a fixture migration and leaves the safe statements alone.
 - A batch that hits a deadlock is retried, and all 2,500 rows are backfilled; `ADD COLUMN … NOT NULL` without a
-  default is flagged, with a default it isn't ([latent-bugs-round3.test.ts](../../verify/tests/latent-bugs-round3.test.ts)).
+  default is flagged, with a default it isn't ([regressions/round-3.test.ts](../../verify/tests/regressions/round-3.test.ts)).
 
 How to write these tests so they prove something:
 - Hold a lock from a second connection (an open transaction) and time a third query. A migration that runs fine on

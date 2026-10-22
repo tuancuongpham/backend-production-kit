@@ -6,7 +6,8 @@
 //   sweep:  concurrency 1–32 on one loop, batch 50, pool of 20 connections
 // Run inside the Docker network:  npm run bench:docker -- bench/compare/webhook-claim.ts
 import pg from 'pg';
-import { freshDatabase, runSqlFile, sleep } from '../../verify/tests/helpers.ts';
+import { freshDatabase, runSqlFile } from '../../verify/tests/support/infra.ts';
+import { sleep } from '../../verify/tests/support/wait.ts';
 import { createInboxWorker, type InboxRow } from '../../skills/webhook-ingestion/references/webhooks.ts';
 import { planSummary, save, selfTimed, table } from './lib.ts';
 

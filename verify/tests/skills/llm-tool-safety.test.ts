@@ -153,6 +153,24 @@ describe('llm-tool-safety', () => {
     });
   });
 
+  it('a write that failed is released: its retry runs it again (unlike one that ran, which never runs twice)', async () => {
+    let attempts = 0;
+    const flaky: ToolDef = {
+      name: 'send_voucher',
+      tier: 'write',
+      description: 'Send a voucher',
+      params: {},
+      run: async () => {
+        if (++attempts === 1) throw new Error('voucher service 503');
+        return { sent: true };
+      },
+    };
+    const s = createToolGuard({ pool, tools: [flaky] }).session({ tenantId: 't1', userId: 'u1', sessionId: 's-flaky' });
+    assert.deepEqual(await s.call('send_voucher', {}, { toolCallId: 'call-v1' }), { status: 'error', message: 'voucher service 503' });
+    assert.deepEqual(await s.call('send_voucher', {}, { toolCallId: 'call-v1' }), { status: 'ok', result: { sent: true } });
+    assert.equal(attempts, 2);
+  });
+
   it('every call is audited: who, which tool and tier, the outcome, and whether untrusted content was in the context', async () => {
     const s = guard.session({ tenantId: 't1', userId: 'u1', sessionId: 's6' });
     await s.call('get_order', { orderId: 'o-1' });
@@ -166,6 +184,14 @@ describe('llm-tool-safety', () => {
       { tool: 'refund_order', tier: 'write', outcome: 'approval_required', untrusted_context: true },
       { tool: 'refund_order', tier: 'write', outcome: 'rejected', untrusted_context: true },
     ]);
+  });
+
+  it('a tool whose pattern has the g or y flag, or an unknown tier, is refused at startup', () => {
+    const tool = (over: Partial<ToolDef>): ToolDef => ({ name: 'find', tier: 'read', description: 'Find', params: {}, run: async () => ({}), ...over });
+    assert.throws(() => createToolGuard({ pool, tools: [tool({ params: { id: { type: 'string', pattern: /o-\d+/g } } })] }), /must not have the g or y flag/);
+    assert.throws(() => createToolGuard({ pool, tools: [tool({ params: { id: { type: 'string', pattern: /o-\d+/y } } })] }), /must not have the g or y flag/);
+    assert.throws(() => createToolGuard({ pool, tools: [tool({ tier: 'admin' as ToolDef['tier'] })] }), /unknown tier/);
+    assert.throws(() => createToolGuard({ pool, tools: [tool({}), tool({})] }), /unique/);
   });
 
   it('schemas() hands the model strict JSON Schema, with the approval rule in the description', () => {

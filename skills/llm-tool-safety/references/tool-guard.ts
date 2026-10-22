@@ -11,6 +11,7 @@
 //  - every call is audited.
 import { createHash, randomUUID } from 'node:crypto';
 import type pg from 'pg';
+import { pgJson, pgText } from './pg-values.ts';
 
 export type Tier = 'read' | 'write' | 'destructive';
 
@@ -65,7 +66,7 @@ export function validateArgs(tool: ToolDef, raw: unknown): Record<string, unknow
       case 'string':
         if (typeof v !== 'string') throw new ToolArgumentError(`"${key}" must be a string`);
         if (spec.maxLength !== undefined && v.length > spec.maxLength) throw new ToolArgumentError(`"${key}" is longer than ${spec.maxLength}`);
-        if (spec.pattern && !spec.pattern.test(v)) throw new ToolArgumentError(`"${key}" has the wrong format`);
+        if (spec.pattern && !wholeMatch(spec.pattern).test(v)) throw new ToolArgumentError(`"${key}" has the wrong format`);
         break;
       case 'integer':
       case 'number':
@@ -86,6 +87,38 @@ export function validateArgs(tool: ToolDef, raw: unknown): Record<string, unknow
     out[key] = v;
   }
   return out;
+}
+
+/**
+ * A format check means the whole value: /o-\d+/ written without ^ and $ would accept "o-1'; DROP TABLE …" because a
+ * part of it matches. Patterns are compiled anchored, once each.
+ */
+const anchored = new WeakMap<RegExp, RegExp>();
+function wholeMatch(pattern: RegExp): RegExp {
+  let re = anchored.get(pattern);
+  // Without g and y: test() on those resumes at lastIndex, so every other call would validate differently. Without m:
+  // with it, ^ and $ match at every line break, and "o-1\nDROP TABLE refunds" passes on its first line.
+  if (!re) anchored.set(pattern, (re = new RegExp(`^(?:${pattern.source})$`, pattern.flags.replace(/[gym]/g, ''))));
+  return re;
+}
+
+/**
+ * The pattern as JSON Schema states it to the model: anchored too, since JSON Schema patterns match anywhere. A source
+ * that already starts with ^ and ends with $ is kept as it is, unless it has an alternation: ^a|b$ anchors each side
+ * only.
+ */
+const schemaPattern = (pattern: RegExp) => (/^\^[^|]*[^\\|]\$$/.test(pattern.source) ? pattern.source : `^(?:${pattern.source})$`);
+
+const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+
+/**
+ * A tool-call id as it is stored: the key of its result. It comes from the model or its provider, so it is made
+ * storable (a NUL) and, past what an index entry can hold, stored as its hash: the same id still finds its result.
+ */
+function storableCallId(id: unknown): string | undefined {
+  if (id === undefined || id === null || id === '') return undefined;
+  const s = pgText(String(id));
+  return s.length <= 256 ? s : `sha256:${createHash('sha256').update(s).digest('hex')}`;
 }
 
 const hashArgs = (tool: string, args: Record<string, unknown>) =>
@@ -148,7 +181,7 @@ class ToolCallLog {
     await this.#pool.query(
       `INSERT INTO tool_audit (tenant_id, user_id, session_id, tool_call_id, tool, tier, args_hash, outcome, approval_id, untrusted_context, detail)
        VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)`,
-      [s.tenantId, s.userId, s.sessionId, e.toolCallId ?? null, e.tool, e.tier ?? null, e.argsHash ?? null, e.outcome, e.approvalId ?? null, untrusted, e.detail?.slice(0, 2000) ?? null],
+      [s.tenantId, s.userId, s.sessionId, pgText(e.toolCallId ?? null), pgText(e.tool), e.tier ?? null, e.argsHash ?? null, e.outcome, e.approvalId ?? null, untrusted, pgText(e.detail?.slice(0, 2000) ?? null)],
     );
   }
 
@@ -156,7 +189,9 @@ class ToolCallLog {
     const { rows } = await this.#pool.query(
       `INSERT INTO tool_approvals (tenant_id, requested_by, session_id, tool, args, args_hash, reason, expires_at)
        VALUES ($1, $2, $3, $4, $5, $6, $7, now() + make_interval(secs => $8)) RETURNING id`,
-      [s.tenantId, s.userId, s.sessionId, tool, JSON.stringify(args), argsHash, reason, ttlSec],
+      // Model output can contain NUL, which jsonb rejects: shown to the approver as U+FFFD. The hash binds the
+      // approval to the arguments as the model sent them.
+      [s.tenantId, s.userId, s.sessionId, tool, pgJson(args), argsHash, reason, ttlSec],
     );
     return rows[0].id;
   }
@@ -220,7 +255,7 @@ class ToolCallLog {
       s.tenantId,
       toolCallId,
       token,
-      JSON.stringify(result ?? null),
+      pgJson(result ?? null),
     ]);
   }
 
@@ -284,25 +319,29 @@ export class ToolSession {
     const { tools, log } = this.#deps;
     const untrusted = await this.isUntrusted(); // the context as the model saw it when it proposed this call
     const audit = (e: AuditEvent) => log.audit(this.#ctx, untrusted, e);
+    // The ids come from the model too. A tool-call id is made storable; an approval id this system could not have
+    // issued is no approval, and must not reach a uuid column (the approvals table, the audit row) as a database error.
+    const toolCallId = storableCallId(opts.toolCallId);
+    const approvalId = opts.approvalId !== undefined && UUID_RE.test(opts.approvalId) ? opts.approvalId : undefined;
     const tool = tools.get(name);
     if (!tool) {
-      await audit({ tool: name, outcome: 'rejected', toolCallId: opts.toolCallId, detail: 'unknown tool' });
+      await audit({ tool: name, outcome: 'rejected', toolCallId, detail: 'unknown tool' });
       return { status: 'rejected', reason: `unknown tool "${name}"` };
     }
     let args: Record<string, unknown>;
     try {
       args = validateArgs(tool, rawArgs);
     } catch (err) {
-      await audit({ tool: name, tier: tool.tier, outcome: 'rejected', toolCallId: opts.toolCallId, detail: (err as Error).message });
+      await audit({ tool: name, tier: tool.tier, outcome: 'rejected', toolCallId, detail: (err as Error).message });
       return { status: 'rejected', reason: (err as Error).message };
     }
     const argsHash = hashArgs(name, args);
-    const base = { tool: name, tier: tool.tier, argsHash, toolCallId: opts.toolCallId, approvalId: opts.approvalId };
+    const base = { tool: name, tier: tool.tier, argsHash, toolCallId, approvalId };
     const reject = async (reason: string): Promise<CallResult> => {
       await audit({ ...base, outcome: 'rejected', detail: reason });
       return { status: 'rejected', reason };
     };
-    const callId = tool.tier === 'read' ? undefined : opts.toolCallId;
+    const callId = tool.tier === 'read' ? undefined : toolCallId;
 
     // 1. A retry of a call that already ran gets its first result. Nothing runs again, so no approval is spent.
     if (callId) {
@@ -319,31 +358,43 @@ export class ToolSession {
     const reason = tool.tier === 'destructive' ? 'destructive tool' : tool.tier === 'write' && untrusted ? 'write tool after untrusted content entered the context' : null;
     if (reason) {
       if (!opts.approvalId) {
-        const approvalId = await log.requestApproval(this.#ctx, name, args, argsHash, reason, this.#deps.approvalTtlSec);
-        await audit({ ...base, outcome: 'approval_required', approvalId, detail: reason });
-        return { status: 'approval_required', approvalId, reason };
+        const requested = await log.requestApproval(this.#ctx, name, args, argsHash, reason, this.#deps.approvalTtlSec);
+        await audit({ ...base, outcome: 'approval_required', approvalId: requested, detail: reason });
+        return { status: 'approval_required', approvalId: requested, reason };
       }
-      const refused = await log.spendApproval(this.#ctx, opts.approvalId, name, argsHash);
+      const refused = approvalId ? await log.spendApproval(this.#ctx, approvalId, name, argsHash) : 'no such approval for this session';
       if (refused) return reject(refused);
     }
 
     // 3. Writes run once per tool-call id: claim it, or take over the claim of a process that died.
     const token = callId ? await log.claim(this.#ctx, callId, name, argsHash, this.#deps.staleRunSec) : null;
     if (callId && !token) return reject('this call is still running');
+    let result: unknown;
     try {
-      const result = await tool.run(args, this.#ctx);
-      if (tool.returnsUntrusted) await this.markUntrusted(); // the model has now read text nobody vetted
-      if (token) await log.finish(this.#ctx, callId!, token, result);
-      await audit({ ...base, outcome: 'ok' });
-      return { status: 'ok', result };
+      result = await tool.run(args, this.#ctx);
     } catch (err) {
-      if (token) await log.release(this.#ctx, callId!, token);
-      const message = String(err instanceof Error ? err.message : err).slice(0, 500);
+      if (token) await log.release(this.#ctx, callId!, token); // it failed: the retry may run it
+      const message = errorText(err);
       await audit({ ...base, outcome: 'error', detail: message });
       return { status: 'error', message };
     }
+    // The tool ran. Whatever fails from here on must not let a retry run it a second time (a second refund): the
+    // claim is kept, and a retry gets "still running" until staleRunSec. Nor may the model see untrusted text that
+    // wasn't recorded as such.
+    try {
+      if (tool.returnsUntrusted) await this.markUntrusted(); // the model is about to read text nobody vetted
+      if (token) await log.finish(this.#ctx, callId!, token, result);
+    } catch (err) {
+      const message = `the tool ran, but its result could not be recorded: ${errorText(err)}`;
+      await audit({ ...base, outcome: 'error', detail: message });
+      return { status: 'error', message };
+    }
+    await audit({ ...base, outcome: 'ok' });
+    return { status: 'ok', result };
   }
 }
+
+const errorText = (err: unknown) => String(err instanceof Error ? err.message : err).slice(0, 500);
 
 export class ToolGuard {
   readonly #deps: GuardDeps;
@@ -375,8 +426,11 @@ export class ToolGuard {
    * visible to its own tenant. Returns false if the approval is gone, already decided, of another tenant, or this
    * approver may not decide it (four eyes).
    */
-  decide(approvalId: string, approver: { tenantId: string; userId: string }, decision: 'approved' | 'denied'): Promise<boolean> {
+  async decide(approvalId: string, approver: { tenantId: string; userId: string }, decision: 'approved' | 'denied'): Promise<boolean> {
     if (approver === null || typeof approver !== 'object') throw new TypeError('decide(): pass the approver as { tenantId, userId }');
+    // The decision usually comes straight from a form. 'used' or 'pending' are statuses too, and would be written as is.
+    if (decision !== 'approved' && decision !== 'denied') throw new TypeError(`decide(): decision must be 'approved' or 'denied', got ${JSON.stringify(decision)}`);
+    if (!UUID_RE.test(approvalId)) return false; // from a URL or a form: a malformed id is an unknown approval
     return this.#deps.log.decide(approvalId, approver, decision, (tool, requestedBy) => !(this.#deps.tools.get(tool)?.approvedBy === 'someone-else' && requestedBy === approver.userId));
   }
 
@@ -394,7 +448,7 @@ export class ToolGuard {
             const common = p.description ? { description: p.description } : {};
             switch (p.type) {
               case 'string':
-                return [k, { type: 'string', ...common, ...(p.maxLength ? { maxLength: p.maxLength } : {}), ...(p.pattern ? { pattern: p.pattern.source } : {}) }];
+                return [k, { type: 'string', ...common, ...(p.maxLength ? { maxLength: p.maxLength } : {}), ...(p.pattern ? { pattern: schemaPattern(p.pattern) } : {}) }];
               case 'integer':
               case 'number':
                 return [k, { type: p.type, ...common, ...(p.min !== undefined ? { minimum: p.min } : {}), ...(p.max !== undefined ? { maximum: p.max } : {}) }];

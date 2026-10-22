@@ -36,9 +36,16 @@ every call → audit (tenant, user, tool, tier, outcome, approval, tainted?)
 
 1. **Tables.** Add [references/tool-guard.sql](references/tool-guard.sql): `tool_approvals`, `tool_results` (run
    once by tool-call id), `tool_audit`, and `tool_sessions` (which conversations are tainted).
-2. **Define tools** with [references/tool-guard.ts](references/tool-guard.ts): `{ name, tier, params, run }`.
+2. **Define tools** with [references/tool-guard.ts](references/tool-guard.ts): `{ name, tier, params, run }`. Copy
+   `pg-values.ts`, the kit's shared helper that makes model output storable, along with it.
    - `params` is strict: types, `min`/`max`, `pattern`, `maxLength`, `enum`. Unknown or missing arguments are
      rejected before `run`.
+   - A `pattern` matches the **whole** value, written with or without `^…$`. `/o-\d+/` alone would accept
+     `o-1'; DROP TABLE refunds; --` because part of it matches. `schemas()` states the pattern anchored too,
+     because a JSON Schema pattern matches anywhere.
+   - Everything the model sends is untrusted, ids included. A tool-call id or an argument with a NUL is stored
+     (as U+FFFD). An approval id the model made up is an unknown approval, not a database error. A result cut
+     mid-emoji is stored, so the retry replays it instead of running the tool again.
    - Mark tools whose output comes from outside with `returnsUntrusted: true` (search, read mail, fetch URL).
    - Inside `run`, scope every query by `ctx.tenantId`, ideally through `withTenant` (`multitenant-postgres`).
 3. **One guard session per agent conversation.** Create one guard per app (`createToolGuard({ pool, tools })`), and per
@@ -54,12 +61,18 @@ every call → audit (tenant, user, tool, tier, outcome, approval, tainted?)
      `await session.markUntrusted()`.
 4. **Approvals.** The UI calls `guard.decide(approvalId, { tenantId, userId }, 'approved' | 'denied')` with the
    approver's identity from *their* authenticated session: an approval can only be decided inside its own tenant.
+   The approval id comes from a URL, so treat it like any input. A malformed or unknown one makes `decide` return
+   `false`; answer 404. Check the decision in the route and answer 400 for anything else: `decide` throws a
+   `TypeError` on it, because `used` and `pending` are statuses too and would otherwise be written as they are.
    The agent retries the same call with `{ approvalId }`, and the guard spends the approval atomically:
    - same tenant, session, tool and arguments;
    - approved, unused, unexpired.
    A retry of a call that already ran (same `toolCallId`) gets its first result back without spending anything. A
    call still `running` after `staleRunSec` (default 10 min) belongs to a process that died, and a retry takes it
    over.
+   A call that failed is released, and its retry runs it. One that ran but whose result couldn't be recorded (a
+   result that can't be serialized, a database blip) answers `error` and stays claimed: its retry gets "still
+   running", never a second refund.
 5. **Model-facing schemas.** Pass `guard.schemas()` as the tool list. It is strict JSON Schema, with "needs a human
    approval" in the description so the model warns the user instead of retrying.
 6. **Monitor `tool_audit`.** Watch approval-required rates per tool, denied approvals, and rejected arguments. A
@@ -113,3 +126,5 @@ approval UI lives.
 - An approval endpoint that takes any approver id. Decide only within the approver's own tenant.
 - A `pattern` regex with the g or y flag: `test()` continues from the last match, so every other call validates
   differently. The guard refuses such tools at startup.
+- Letting the database validate model output. A malformed uuid or a NUL becomes a 500 and a stack trace, not a
+  reason the model can act on, and an error *after* a write ran (storing its result) made the retry run it again.

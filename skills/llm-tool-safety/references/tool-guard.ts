@@ -205,7 +205,7 @@ class ToolCallLog {
       [approvalId, s.tenantId, s.sessionId, tool, argsHash],
     );
     if (used.rowCount === 1) return null;
-    const { rows } = await this.#pool.query(
+    const { rows } = await this.#pool.query<{ status: string; expired: boolean; same_call: boolean; same_session: boolean }>(
       `SELECT status, expires_at <= now() AS expired, tool = $2 AND args_hash = $3 AS same_call, tenant_id = $4 AND session_id = $5 AS same_session
          FROM tool_approvals WHERE id = $1`,
       [approvalId, tool, argsHash, s.tenantId, s.sessionId],
@@ -216,6 +216,11 @@ class ToolCallLog {
     if (r.status === 'used') return 'the approval was already used';
     if (r.status !== 'approved') return `the approval is ${r.status}`;
     return 'the approval has expired';
+  }
+
+  /** The call this approval was spent on didn't run (it failed, or never got its claim): the retry may spend it again. */
+  async unspendApproval(s: ToolContext, approvalId: string): Promise<void> {
+    await this.#pool.query(`UPDATE tool_approvals SET status = 'approved', used_at = NULL WHERE id = $1 AND tenant_id = $2 AND status = 'used'`, [approvalId, s.tenantId]);
   }
 
   async decide(approvalId: string, approver: { tenantId: string; userId: string }, decision: 'approved' | 'denied', mayDecide: (tool: string, requestedBy: string) => boolean): Promise<boolean> {
@@ -356,6 +361,7 @@ export class ToolSession {
 
     // 2. Approval: always for destructive tools, and for writes once untrusted content is in the context.
     const reason = tool.tier === 'destructive' ? 'destructive tool' : tool.tier === 'write' && untrusted ? 'write tool after untrusted content entered the context' : null;
+    let spent: string | undefined; // the approval this call used, given back if nothing runs
     if (reason) {
       if (!opts.approvalId) {
         const requested = await log.requestApproval(this.#ctx, name, args, argsHash, reason, this.#deps.approvalTtlSec);
@@ -364,16 +370,23 @@ export class ToolSession {
       }
       const refused = approvalId ? await log.spendApproval(this.#ctx, approvalId, name, argsHash) : 'no such approval for this session';
       if (refused) return reject(refused);
+      spent = approvalId;
     }
 
     // 3. Writes run once per tool-call id: claim it, or take over the claim of a process that died.
     const token = callId ? await log.claim(this.#ctx, callId, name, argsHash, this.#deps.staleRunSec) : null;
-    if (callId && !token) return reject('this call is still running');
+    if (callId && !token) {
+      if (spent) await log.unspendApproval(this.#ctx, spent);
+      return reject('this call is still running');
+    }
     let result: unknown;
     try {
       result = await tool.run(args, this.#ctx);
     } catch (err) {
-      if (token) await log.release(this.#ctx, callId!, token); // it failed: the retry may run it
+      // It failed, so nothing was done: the retry may run it, with the approval a human already gave. Otherwise the
+      // supervisor would be asked to approve the same refund again because the payment API answered 503 once.
+      if (token) await log.release(this.#ctx, callId!, token);
+      if (spent) await log.unspendApproval(this.#ctx, spent);
       const message = errorText(err);
       await audit({ ...base, outcome: 'error', detail: message });
       return { status: 'error', message };

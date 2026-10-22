@@ -70,9 +70,10 @@ every call → audit (tenant, user, tool, tier, outcome, approval, tainted?)
    A retry of a call that already ran (same `toolCallId`) gets its first result back without spending anything. A
    call still `running` after `staleRunSec` (default 10 min) belongs to a process that died, and a retry takes it
    over.
-   A call that failed is released, and its retry runs it. One that ran but whose result couldn't be recorded (a
-   result that can't be serialized, a database blip) answers `error` and stays claimed: its retry gets "still
-   running", never a second refund.
+   A call that failed is released, and its retry runs it. If it was approved, the approval is given back too, so the
+   retry runs on the approval the human already gave: the supervisor isn't asked twice because the payment API
+   answered 503 once. One that ran but whose result couldn't be recorded (a result that can't be serialized, a
+   database blip) answers `error` and stays claimed: its retry gets "still running", never a second refund.
 5. **Model-facing schemas.** Pass `guard.schemas()` as the tool list. It is strict JSON Schema, with "needs a human
    approval" in the description so the model warns the user instead of retrying.
 6. **Monitor `tool_audit`.** Watch approval-required rates per tool, denied approvals, and rejected arguments. A
@@ -137,6 +138,8 @@ approval UI lives.
 - An approval that says "Approve refund?" with the model's paraphrase. Show the stored arguments the guard will run.
 - Approvals not bound to the arguments: the user approves 50,000 VND and the model sends 5,000,000.
 - Re-usable approvals, or none that expire.
+- Spending an approval on a run that failed. Nothing happened, yet the retry was refused as "already used", and a
+  human had to approve the same refund again.
 - The tenant or user id as a tool argument.
 - No idempotency on write tools. Agents retry on timeouts, and every retry is another refund.
 - Logging tool calls only when they succeed. The attempts that were blocked are the security signal.

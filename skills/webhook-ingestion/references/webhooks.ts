@@ -37,13 +37,17 @@ export function verifyTimestampedSignature(opts: {
   toleranceSec?: number;
   nowSec?: number;
 }): boolean {
+  // The replay window. From an unset environment variable it is NaN, and `age > NaN` is never true: a request captured
+  // a year ago would verify. A configuration error, so it throws rather than answering false for every request.
+  const tolerance = opts.toleranceSec ?? 300;
+  if (!(tolerance > 0) || !Number.isFinite(tolerance)) throw new RangeError(`verifyTimestampedSignature: toleranceSec must be a positive number, got ${tolerance}`);
   if (!opts.header) return false;
   const parts = opts.header.split(',').map((p) => p.trim().split('=') as [string, string]);
   const t = Number(parts.find(([k]) => k === 't')?.[1]);
   const sigs = parts.filter(([k]) => k === 'v1').map(([, v]) => v);
   if (!Number.isFinite(t) || sigs.length === 0) return false;
   const now = opts.nowSec ?? Math.floor(Date.now() / 1000);
-  if (Math.abs(now - t) > (opts.toleranceSec ?? 300)) return false;
+  if (Math.abs(now - t) > tolerance) return false;
   const expected = createHmac('sha256', opts.secret).update(`${t}.`).update(opts.rawBody).digest('hex');
   return sigs.some((s) => safeEqualHex(expected, s));
 }
@@ -145,6 +149,11 @@ const positiveInt = (v: number, name: string) => {
   if (!Number.isInteger(v) || v < 1) throw new RangeError(`webhook worker: ${name} must be a positive integer, got ${v}`);
   return v;
 };
+/** A NaN delay (an unset environment variable) fails every retry: the row is never dead-lettered, only claimed again. */
+const delayMs = (v: number, name: string) => {
+  if (!Number.isFinite(v) || v < 0) throw new RangeError(`webhook worker: ${name} must be a number of ms, 0 or more, got ${v}`);
+  return v;
+};
 
 /**
  * Processes the inbox. Every claim gets a new lease id, and only the holder of the current lease may finish a row:
@@ -171,8 +180,8 @@ export class InboxWorker {
     this.#batchSize = positiveInt(o.batchSize ?? 10, 'batchSize');
     this.#concurrency = positiveInt(o.concurrency ?? 1, 'concurrency');
     this.#stuckAfterSec = positiveInt(o.stuckAfterSec ?? 300, 'stuckAfterSec');
-    this.#baseDelayMs = o.baseDelayMs ?? 2_000;
-    this.#maxDelayMs = o.maxDelayMs ?? 3_600_000;
+    this.#baseDelayMs = delayMs(o.baseDelayMs ?? 2_000, 'baseDelayMs');
+    this.#maxDelayMs = delayMs(o.maxDelayMs ?? 3_600_000, 'maxDelayMs');
     this.#random = o.random ?? Math.random;
     this.#onDead = o.onDead;
   }

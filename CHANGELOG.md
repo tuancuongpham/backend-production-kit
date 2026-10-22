@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 0.5.0 — 2026-10-22
 
 ### Fixed — latent bugs, round 3
 Every reference file was read again, and each suspected failure was written down as a hypothesis and as a test of

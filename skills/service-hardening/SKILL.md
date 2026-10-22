@@ -29,7 +29,18 @@ Start from [references/server.ts](references/server.ts) (node:http; wrap Express
 5. **Probes**: `/livez` checks the process only, with **no dependency checks** (otherwise a DB blip restarts every pod at once). `/readyz` runs dependency checks with a timeout and returns 503 while draining.
 6. **Body limits**: `readBody(req, maxBytes)` checks `content-length` first, then counts while streaming. Return 413, not an out-of-memory crash. Make sure the client actually *receives* the 413. Out of the box, Node either keeps reading and discarding the rest of the upload so it can reuse the connection, or closes a socket that still has unread upload data. In that case the kernel answers with a reset that wipes out the 413, and the client sees `ECONNRESET` and retries the whole upload. The reference stops reading, sends the 413 with `Connection: close`, ends the socket gracefully and destroys it after `rejectLingerMs` (2 s): the client gets its 413, and the server reads under 8 MB of a 32 MB upload.
 7. **Request ids**: accept a well-formed `x-request-id` or generate one; echo it, log it, put it on spans.
-8. **Graceful shutdown** via `installSignalHandlers(shutdown)`: readiness → 503 → wait `drainDelayMs` → stop accepting + close idle keep-alive sockets → wait for in-flight up to `shutdownGraceMs` → force-close → `onShutdown` hooks (DB pools, telemetry flush). A second signal force-exits. In Docker, run node as PID 1 with `exec`/`--init`, or `tini`, so SIGTERM actually reaches it.
+8. **Graceful shutdown** via `installSignalHandlers(shutdown)`. The steps, in order:
+   1. readiness returns 503, and the server waits `drainDelayMs`;
+   2. it stops accepting, closes idle keep-alive sockets and ends long-lived responses;
+   3. it waits for in-flight requests, up to `shutdownGraceMs`, then force-closes the rest;
+   4. it runs the `onShutdown` hooks (DB pools, telemetry flush).
+
+   A second signal force-exits. In Docker, run node as PID 1 with `exec`/`--init`, or `tini`, so SIGTERM actually
+   reaches it.
+   Requests that never end on their own (event streams, long polls) end on `ctx.shuttingDown`. That signal fires
+   at step 2, once the load balancer sends traffic elsewhere, so their clients reconnect to an instance that stays.
+   For SSE that is `openSse(req, res, { closeOn: ctx.shuttingDown })`. Without it, each open stream makes the deploy
+   wait out the whole grace period and end forced.
 9. **Config validation at startup**: fail fast on missing env vars, before readiness ever turns green.
 
 The full go-live list is in [references/checklist.md](references/checklist.md).
@@ -39,6 +50,11 @@ The full go-live list is in [references/checklist.md](references/checklist.md).
 [verify/tests/skills/service-hardening.test.ts](../../verify/tests/skills/service-hardening.test.ts):
 - Shutdown during 3 in-flight slow requests → all 3 return 200; `/readyz` returns 503 and new work returns 503 during the drain; the listener is closed afterwards; `forced: false`.
 - A straggler beyond the grace period → shutdown still completes within the bound (`forced: true`) and the hooks still run.
+- `ctx.shuttingDown` fires after the drain delay, not during it: an open stream ends then, and the shutdown finishes
+  without waiting out the grace period (`forced: false`).
+- A client that disconnects mid-upload fails `readBody` at once; `deadline(ms, ctx.signal)` aborts on whichever
+  comes first.
+- `installSignalHandlers`: SIGTERM drains then exits 0, a second signal exits 1 at once, a failing shutdown exits 1.
 - `maxInFlight: 2` with 5 concurrent → exactly two 200s and three 503s, and the 503s are immediate (< 150 ms).
 - Client abort → the handler's signal fires, with the request id preserved.
 - Handler throws → 500, the server keeps serving; oversize body → 413; malformed incoming request ids are replaced.
@@ -57,3 +73,4 @@ ADR: in-flight cap (with its load-test evidence), timeout values, and shutdown t
 - Dependency checks in liveness: one DB hiccup becomes a cluster-wide restart.
 - Retrying 503s without jitter or backoff on the client side, which amplifies overload.
 - Rejecting an oversized upload by destroying the request: the client gets a connection reset instead of a 413, can't tell "too big" from "network blip", and retries the same upload.
+- A `Promise.race` against a bare `setTimeout` for the grace period. The timer outlives the race, and keeps the process alive for the whole grace period after a clean drain. Use `withTimeout`, which clears its timer.

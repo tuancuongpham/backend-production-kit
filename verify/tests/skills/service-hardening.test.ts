@@ -1,8 +1,9 @@
 import { describe, it } from 'node:test';
 import assert from 'node:assert/strict';
 import { once } from 'node:events';
-import { sleep } from '../support/wait.ts';
-import { createHardenedServer, readBody } from '../../../skills/service-hardening/references/server.ts';
+import http from 'node:http';
+import { sleep, waitFor } from '../support/wait.ts';
+import { createHardenedServer, deadline, installSignalHandlers, readBody } from '../../../skills/service-hardening/references/server.ts';
 
 function app(extra: Partial<Parameters<typeof createHardenedServer>[0]> = {}) {
   const aborted: string[] = [];
@@ -49,6 +50,30 @@ describe('service-hardening', () => {
     assert.deepEqual(await Promise.all(inflight), [[200, 'slow done'], [200, 'slow done'], [200, 'slow done']]);
     assert.deepEqual(await done, { forced: false });
     await assert.rejects(fetch(`${base}/livez`), 'listener closed after shutdown');
+  });
+
+  it('ctx.shuttingDown fires once traffic has moved (after the drain delay), so long-lived responses end then', async () => {
+    let endedAt = 0;
+    const srv = createHardenedServer({
+      drainDelayMs: 100,
+      shutdownGraceMs: 2000,
+      handler: async (_req, res, ctx) => {
+        res.writeHead(200, { 'content-type': 'text/event-stream' }).write(': open\n\n');
+        await new Promise<void>((resolve) => ctx.shuttingDown.addEventListener('abort', () => resolve(), { once: true }));
+        endedAt = performance.now();
+        res.end(); // a feed's browser now reconnects, to an instance the load balancer still sends traffic to
+      },
+    });
+    const port = await srv.listen();
+    const feed = fetch(`http://127.0.0.1:${port}/feed`).then((r) => r.text());
+    await sleep(30);
+    const startedAt = performance.now();
+    const done = srv.shutdown();
+    await sleep(50);
+    assert.equal(endedAt, 0, 'not during the drain delay: its reconnect would come back here, into a 503');
+    assert.equal(await feed, ': open\n\n');
+    assert.ok(endedAt - startedAt >= 95, `ended ${endedAt - startedAt} ms into the shutdown`);
+    assert.deepEqual(await done, { forced: false }, 'without waiting out the grace period');
   });
 
   it('grace period bounds shutdown: stragglers are cut off', async () => {
@@ -125,5 +150,90 @@ describe('service-hardening', () => {
     srv.server.listen(0);
     await once(srv.server, 'listening');
     await srv.shutdown();
+  });
+
+  it('a client that disconnects mid-upload fails readBody at once, instead of leaving the handler waiting', async () => {
+    let failure: Error | undefined;
+    const srv = createHardenedServer({
+      drainDelayMs: 0,
+      handler: async (req, res) => {
+        try {
+          await readBody(req, 1024 * 1024);
+          res.end('ok');
+        } catch (err) {
+          failure = err as Error;
+        }
+      },
+    });
+    const port = await srv.listen();
+    const upload = http.request({ host: '127.0.0.1', port, method: 'POST', path: '/upload', headers: { 'content-length': '100000' } });
+    upload.on('error', () => {});
+    upload.write('x'.repeat(1000));
+    await waitFor(() => srv.stats().inFlight === 1, 'the upload to start');
+    upload.destroy(); // the phone lost its signal
+    await waitFor(() => failure !== undefined, 'the read to fail');
+    assert.match(failure!.message, /aborted/);
+    await srv.shutdown();
+  });
+
+  it('deadline(ms, ctx.signal) aborts at the deadline or when the client leaves, whichever comes first', async () => {
+    const client = new AbortController();
+    const early = deadline(10_000, client.signal);
+    client.abort(new Error('client disconnected'));
+    assert.equal(early.aborted, true);
+    const late = deadline(20, new AbortController().signal);
+    await sleep(60);
+    assert.equal(late.aborted, true);
+  });
+
+  describe('installSignalHandlers', () => {
+    // process.emit runs the handlers without a real signal. The listeners they add are removed afterwards.
+    type Listener = (...args: unknown[]) => void;
+    const events = ['SIGTERM', 'SIGINT', 'unhandledRejection'];
+    const listenersOf = (event: string) => process.listeners(event as 'SIGTERM') as Listener[];
+    const withHandlers = async (shutdown: () => Promise<unknown>, body: (exits: number[]) => Promise<void>) => {
+      const before = new Map(events.map((e) => [e, new Set(listenersOf(e))]));
+      const exits: number[] = [];
+      installSignalHandlers(shutdown, (code) => void exits.push(code));
+      try {
+        await body(exits);
+      } finally {
+        for (const e of events) for (const l of listenersOf(e)) if (!before.get(e)!.has(l)) process.off(e as 'SIGTERM', l);
+      }
+    };
+
+    it('SIGTERM shuts down gracefully, then exits 0', async () => {
+      await withHandlers(
+        () => sleep(20),
+        async (exits) => {
+          process.emit('SIGTERM');
+          assert.deepEqual(exits, [], 'not before the in-flight work is done');
+          await sleep(60);
+          assert.deepEqual(exits, [0]);
+        },
+      );
+    });
+
+    it('a second signal while shutting down exits 1 at once (an operator pressing Ctrl+C again)', async () => {
+      await withHandlers(
+        () => new Promise(() => {}),
+        async (exits) => {
+          process.emit('SIGTERM');
+          process.emit('SIGINT');
+          assert.deepEqual(exits, [1]);
+        },
+      );
+    });
+
+    it('a shutdown that fails exits 1', async () => {
+      await withHandlers(
+        () => Promise.reject(new Error('a hook hung up')),
+        async (exits) => {
+          process.emit('SIGTERM');
+          await sleep(20);
+          assert.deepEqual(exits, [1]);
+        },
+      );
+    });
   });
 });

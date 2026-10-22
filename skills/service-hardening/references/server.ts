@@ -4,12 +4,21 @@
 // concerns below stay the same.
 import http from 'node:http';
 import { randomUUID } from 'node:crypto';
+import { setMaxListeners } from 'node:events';
 import { withTimeout } from './with-timeout.ts';
 
 export interface RequestContext {
   /** Aborted when the client disconnects — pass it to DB queries, fetch, LLM calls. */
   signal: AbortSignal;
   requestId: string;
+  /**
+   * Aborted when a shutdown stops taking requests: after the drain delay, once the load balancer sends traffic
+   * elsewhere. Long-lived responses end on it, so their clients reconnect to an instance that stays: event streams
+   * (`openSse(req, res, { closeOn: ctx.shuttingDown })`), long polls. Short requests ignore it and finish within the
+   * grace period. Ending a stream earlier would send its reconnect back here, into a 503, which makes EventSource
+   * give up for good.
+   */
+  shuttingDown: AbortSignal;
 }
 
 export interface HardenedServerOptions {
@@ -123,6 +132,8 @@ export function createHardenedServer(o: HardenedServerOptions) {
   let draining = false;
   let onIdle: (() => void) | null = null;
   let shutdownPromise: Promise<{ forced: boolean }> | null = null;
+  const stopping = new AbortController(); // RequestContext.shuttingDown
+  setMaxListeners(0, stopping.signal); // one listener per open stream, each removed when its stream ends
 
   async function ready(): Promise<boolean> {
     if (draining) return false;
@@ -160,7 +171,7 @@ export function createHardenedServer(o: HardenedServerOptions) {
     res.setHeader('x-request-id', requestId);
 
     try {
-      await o.handler(req, res, { signal: ac.signal, requestId });
+      await o.handler(req, res, { signal: ac.signal, requestId, shuttingDown: stopping.signal });
     } catch (err) {
       const status = err instanceof PayloadTooLargeError ? 413 : 500;
       log('request failed', { requestId, status, error: String(err) });
@@ -179,8 +190,8 @@ export function createHardenedServer(o: HardenedServerOptions) {
 
   /**
    * 1. readiness → 503 (LB stops routing)   2. wait drainDelay
-   * 3. stop accepting, close idle sockets    4. wait for in-flight (≤ grace)
-   * 5. force-close the rest                  6. run onShutdown hooks
+   * 3. stop accepting, close idle sockets, end long-lived responses (ctx.shuttingDown)
+   * 4. wait for in-flight (≤ grace)         5. force-close the rest   6. run onShutdown hooks
    */
   function shutdown(): Promise<{ forced: boolean }> {
     shutdownPromise ??= (async () => {
@@ -190,7 +201,13 @@ export function createHardenedServer(o: HardenedServerOptions) {
       const closed = new Promise<void>((r) => server.close(() => r()));
       server.closeIdleConnections();
       const idle = inFlight === 0 ? Promise.resolve() : new Promise<void>((r) => (onIdle = r));
-      const finished = await Promise.race([idle.then(() => true), sleep(o.shutdownGraceMs ?? 20_000).then(() => false)]);
+      stopping.abort(new Error('server shutting down'));
+      // withTimeout clears its timer: a bare sleep() in the race would keep the process alive for the whole grace
+      // period after a clean drain, and a deploy would wait shutdownGraceMs for nothing.
+      const finished = await withTimeout(idle, o.shutdownGraceMs ?? 20_000, () => new Error('grace period over')).then(
+        () => true,
+        () => false,
+      );
       server.closeAllConnections();
       await closed;
       for (const hook of o.onShutdown ?? []) {

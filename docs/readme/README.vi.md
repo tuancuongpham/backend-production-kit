@@ -73,6 +73,10 @@ mẫu (nhiều cái là sự cố production kinh điển), nay đã sửa và c
 | Prompt RAG 240 KB trong trace | span quá lớn bị loại bỏ: **chính những request lớn nhất không truy vết được** | giới hạn 32 KiB mỗi thuộc tính |
 | Postgres ngắt kết nối giữa transaction (failover, `idle_in_transaction_session_timeout`) | **cả process Node bị sập**, kéo theo mọi request đang xử lý | chỉ request đó lỗi; có test ở mọi skill giữ kết nối |
 | Hybrid search nhận câu hỏi thay vì từ khóa ("làm sao để thanh toán qua vnpay?") | phần tìm theo từ khóa đòi **khớp mọi từ**, nên **không khớp câu nào trong 10 câu hỏi**, phó mặc hoàn toàn cho embedding | khớp mọi từ trước, không có thì khớp bất kỳ từ nào: phần từ khóa tìm đúng 10/10, xếp hạng truy vấn kiểu ô tìm kiếm không đổi |
+| Ngân sách LLM cho gói không có trong bảng (giới hạn NaN) | **không có trần chi tiêu**: NaN so sánh ra false trong JavaScript và lớn hơn mọi số tiền trong Postgres | lời gọi bị từ chối: ngân sách fail closed |
+| Câu trả lời LLM thiếu số token | tính giá thành NaN, **khóa ngân sách của tenant tới hết tháng** | ghi theo số đã ước tính lúc giữ chỗ, và báo lỗi |
+| Bí mật nằm dưới tên khóa kiểu camelCase hoặc header (`clientSecret`, `newPassword`, `x-auth-token`) | **lọt vào log nguyên văn** | che theo phần đuôi của tên khóa; số token và cache key vẫn giữ |
+| Request tới trong lúc drain khi deploy | **mỗi request nhận một 503**: đúng lỗi mà khoảng drain sinh ra để tránh | vẫn được phục vụ, kèm `Connection: close` để request sau đi nơi khác |
 | Relay outbox mất kết nối database giữa một lô | **vẫn publish tiếp phần còn lại của lô**, và cả lô bị gửi lại ở lần chạy sau | dừng ngay khi nhận ra kết nối đã mất: chỉ message đang gửi dở bị gửi hai lần |
 | Handler webhook chạy lâu hơn `stuckAfterSec` (5 phút) | worker thứ hai coi event là "kẹt", lấy lại và chạy handler song song với lần đầu: **thanh toán bị cộng tiền hai lần** | chỉ worker đang giữ claim hiện tại mới được hoàn tất event: cộng tiền một lần |
 | Cache store lỗi sau khi LLM đã trả lời | bị coi như provider lỗi: gateway **mua lại câu trả lời** từ model dự phòng, tính lỗi cho provider đang khỏe và để kẹt phần ngân sách đã giữ chỗ | trả về câu trả lời; lỗi cache được báo cáo |
@@ -109,9 +113,21 @@ Giờ tất cả đều pass.
 
 Vòng 5 đọc lại code của vòng 4 với con mắt người review, chạy linter có hiểu kiểu dữ liệu trên toàn repo, và đo
 xem đoạn code nào chưa test nào chạm tới. Vòng này tìm thêm 21 bug; mỗi giả thuyết đều fail trước khi được sửa
-([`round-5.test.ts`](../../verify/tests/regressions/round-5.test.ts)). Bộ test giờ có 406 test, xếp theo thứ chúng chứng
-minh ([verify/README.md](../../verify/README.md)). Chúng phủ 99,5% số dòng và 92,1% số nhánh của code mẫu, và CI
-fail nếu tụt dưới 98% và 90%.
+([`round-5.test.ts`](../../verify/tests/regressions/round-5.test.ts)).
+
+Vòng 6 xem xét những con số đến từ cấu hình và từ hệ thống khác, cùng những lỗi lan sang phần việc bên cạnh. Cả 29
+giả thuyết đều fail trước khi được sửa ([`round-6.test.ts`](../../verify/tests/regressions/round-6.test.ts)):
+- một thiết lập đọc từ biến môi trường chưa đặt là NaN, và NaN so sánh với gì cũng ra false. Ở 14 skill, một giới
+  hạn biến mất mà không báo lỗi: không còn cắt tải, không còn rate limit, ngân sách không có trần, chữ ký webhook bị
+  bắt được từ một năm trước vẫn hợp lệ. Giờ mọi thành phần từ chối nó ngay khi khởi động;
+- một câu trả lời LLM thiếu số token, tính giá thành NaN, khóa ngân sách của tenant đó tới hết tháng;
+- `clientSecret`, `newPassword`, `idToken` và `x-auth-token` lọt vào log nguyên văn;
+- một schedule có biểu thức cron không thể xảy ra làm dừng mọi job định kỳ, và một dịch vụ lưu trữ không bao giờ
+  trả lời giữ treo yêu cầu xóa tài khoản của người dùng;
+- trong lúc drain khi deploy, request mà load balancer vẫn gửi tới bị trả 503.
+
+Bộ test giờ có 436 test, xếp theo thứ chúng chứng minh ([verify/README.md](../../verify/README.md)). Chúng phủ 99,5%
+số dòng và 93,0% số nhánh của code mẫu, và CI fail nếu tụt dưới 98% và 90%.
 
 ## Đã được test với các sự cố thật
 
@@ -127,6 +143,8 @@ Các skill mới có test dựng lại đúng sự cố, không chỉ đường 
 | Phản hồi từ database chậm 1 giây | `statement_timeout` phía server **không bao giờ kích hoạt**; `query_timeout` phía client cắt lời gọi trong chưa tới 600 ms ([`resilience-testing`](../../skills/resilience-testing/SKILL.md)) |
 | Failover làm kết nối mới rơi vào hố đen | pool không có `connectionTimeoutMillis` **vẫn đang chờ sau 2 giây** (nó chờ mãi mãi); đặt 500 ms thì lỗi trong chưa tới 1 giây |
 | Redis chậm hoặc chết | rate limiter tự quyết định cục bộ trong 150 ms và quay lại Redis khi Redis hồi phục; cache lấy dữ liệu từ database và báo sự cố |
+| Một lần deploy quên đặt biến môi trường | thành phần đó **từ chối khởi động** và nêu tên thiết lập. Trước đây `Number(undefined)` là NaN và giới hạn lặng lẽ biến mất: grace period NaN cắt mọi request ngay khi deploy bắt đầu, timeout NaN của limiter cho qua tất cả |
+| Giá thay đổi đúng lúc một request đang đọc nó | lần đọc chậm không thể ghi lại giá cũ sau `invalidate()`: cache chỉ ghi khi khóa còn đúng như lúc đọc ([`cache-stampede`](../../skills/cache-stampede/SKILL.md)) |
 
 ## Nhanh hơn, và được đo so với các phương án khác
 
@@ -149,6 +167,9 @@ dùng phương án thắng ([toàn bộ bảng số, query plan và đánh đổ
 | Tra cứu semantic cache ở chế độ shadow | trước lời gọi model, song song với lời gọi model | song song | 108 ms mỗi request thay vì 206 ms (embedding 100 ms, model 100 ms) |
 | Redis rơi vào hố đen phía sau cache | timeout 50 ms cho mỗi request, circuit breaker | breaker | 20 request: 181 ms thay vì 1.236 ms |
 | Transaction theo tenant (RLS) | 4 round trip, 3 round trip | 3 | mỗi request nhanh hơn 19%; bản thân RLS gần như không tốn gì |
+| Một lần gọi tool database của agent | 4 round trip, 3 round trip | 3 | mỗi lần gọi nhanh hơn 15% (p50 0,60 → 0,51 ms) |
+| Đánh giá truy xuất trong CI | từng truy vấn một, 4 hoặc 8 truy vấn cùng lúc | 4 (mặc định) | 198 truy vấn: 16,6 s → 4,2 s, metric giữ nguyên |
+| Dọn outbox theo thời hạn lưu | một lệnh `DELETE`, chia lô, chia lô qua index | một lệnh `DELETE` (giữ nguyên) | chia lô chậm hơn 11 lần, câu lệnh dài nhất cũng không ngắn hơn |
 | Client của rate limiter | mặc định của ioredis, auto-pipelining | mặc định (giữ nguyên) | auto-pipelining chậm hơn 11% |
 | Che PII | có hint, không hint, một regex gộp | có hint (giữ nguyên) | nhanh hơn 1,3–4,7 lần so với các phương án khác |
 
@@ -207,7 +228,7 @@ theo khách"); skill phù hợp sẽ tự được nạp.
 - **Một bộ khung dùng chung nhỏ** (transaction chịu được kết nối chết, circuit breaker half-open, deadline, vòng lặp
   worker, văn bản lưu được vào Postgres, hook không thể làm hỏng công việc), được chép vào từng skill và CI giữ cho các
   bản chép giống hệt nhau.
-- **Mười hai bất biến** mọi skill đều giữ, mỗi cái là một bug bộ kit từng mắc: [docs/architecture.md](../architecture.md).
+- **Mười bốn bất biến** mọi skill đều giữ, mỗi cái là một bug bộ kit từng mắc: [docs/architecture.md](../architecture.md).
 
 ## Tự kiểm chứng
 

@@ -114,11 +114,82 @@ missing.
 - `pii-redaction` and `llm-observability`: truncating a long log line or trace attribute could cut an emoji in two,
   leaving invalid text for whatever reads it next.
 
+### Fixed — latent bugs, round 6: configuration, accounting, isolation
+Round 6 looked at the numbers that arrive from configuration and from other systems, and at failures that spread to
+the work beside them. Its 29 hypotheses (`verify/tests/regressions/round-6.test.ts`) all failed before their fixes
+and pass now.
+- A setting read from an unset environment variable is NaN, and NaN compares false with everything: in 14 skills a
+  limit stopped limiting without an error. Every component now refuses NaN, negative values and a percentage where a
+  ratio belongs with a `RangeError` before it starts:
+  - `service-hardening`: `maxInFlight: NaN` shed nothing, and a NaN grace period cut every in-flight request when a
+    deploy began;
+  - `rate-limiting`: a NaN `timeoutMs` failed every Redis call at once, so `'open'` allowed everything;
+  - `cache-stampede`: a NaN `timeoutMs`, `staleSec`, `jitter`, `lockMs` or `waitMs` each switched the cache off;
+  - `llm-gateway`: a NaN timeout failed every provider and opened their breakers, and a `semanticThreshold` of 95
+    (meant as 95%) never matched;
+  - worker loops (`job-queue`, `webhook-ingestion`, `outbox-pattern`): `loops: NaN` started no loop at all, `idleMs:
+    NaN` polled every millisecond, and a NaN retry delay failed every retry, in `job-queue` the rescue of expired
+    leases with it;
+  - `webhook-ingestion`: a NaN `toleranceSec` accepted a signature captured a year ago;
+  - `sse-streaming`: a NaN heartbeat pinged every millisecond, and a NaN `maxBufferedBytes` or `maxQueue` never
+    dropped a stalled client;
+  - `zero-downtime-migrations`: NaN `attempts` and `retries` retried forever, and `batchSize: 0` "finished" a
+    backfill that did nothing;
+  - `agent-safe-db`, `data-retention-and-erasure`, `pii-redaction`, `rag-evals`: row caps, pool sizes, deadlines,
+    the per-line work bound, and gate thresholds (a NaN threshold passed every regression);
+  - `job-queue`: a priority outside smallint, or a `maxAttempts` beyond an int, was a database error.
+- `llm-gateway`:
+  - a monthly limit of NaN (a plan missing from the table) let every reservation through: NaN compares false in
+    JavaScript and above every amount in Postgres `numeric`. The call is now refused.
+  - An answer without token counts, as some SDKs return streamed answers, threw after the answer was paid for. With
+    one count missing, the call was priced at NaN: in Postgres `spent_usd` became NaN and refused every later call of
+    that tenant for the month. The reserved estimate is booked instead, and reported to `onError(err, 'usage')`.
+  - A semantic cache hit returned the question another user had asked, name and order number included.
+- `pii-redaction`: secrets under the names apps give them reached the logs in clear: `clientSecret`, `newPassword`,
+  `passwordHash`, `idToken`, `x-auth-token`, `proxy-authorization`, `aws_secret_access_key`. Keys now match by how
+  they end; `inputTokens`, `max_tokens`, `cacheKey` and `publicKey` keep their values. An object with `toJSON` (a
+  `URL` holding `user:password`) was logged as `{}`; it is redacted as the logger prints it.
+- `job-queue`: one schedule whose `next()` returned an Invalid Date (an impossible cron expression) or threw stopped
+  every recurring job, at registration and on every tick. Each schedule is now checked on its own, and the failures
+  go to the new `onError` option.
+- `data-retention-and-erasure`: an external store that never answered hung the user's deletion request, and every
+  request claimed beside it. Each store call now gets `storeTimeoutMs` (default 30 s) and an abort signal.
+- `agent-safe-db`: an async audit that rejected was an unhandled rejection, which ends the process. The audit is
+  awaited, and a call it can't record fails.
+- `llm-tool-safety`: an approved call whose run failed (the payment API answered 503) couldn't be retried with its
+  approval, "already used", so a human had to approve the same refund again. The approval is given back with the
+  claim.
+- `service-hardening`:
+  - during the drain delay, requests the load balancer still sent got a 503: the error the delay exists to avoid.
+    They are served now, with `Connection: close`.
+  - `listen()` on a taken port never settled, and its unhandled `'error'` event crashed the process. It rejects with
+    `EADDRINUSE`.
+- `cache-stampede`: a fill or a background refresh that read the old row before a change wrote it back after the
+  change's `invalidate()`, for a whole TTL. Writes are compare-and-set against what the writer saw, and `invalidate`
+  leaves a tombstone.
+- `zero-downtime-migrations`:
+  - an unnamed `CREATE INDEX CONCURRENTLY` that failed left its INVALID index behind, one more on every retry;
+  - a quoted identifier holding a `;` split its statement, and the linter missed what followed. `TRUNCATE` is now a
+    warning.
+- `slo-alerting`: two SLOs with the same name produced a rule file Prometheus refuses whole, every other alert with
+  it.
+- `sse-streaming`: an event without data threw a `TypeError`.
+
 ### Changed
-- `service-hardening`: `RequestContext.shuttingDown`, an `AbortSignal` that fires once a shutdown stops taking
-  requests, after the drain delay. Long-lived responses end on it, so their clients reconnect to an instance that
-  stays. Ending earlier would send the reconnect back to this instance, into a 503, which makes EventSource give
-  up.
+- `service-hardening`:
+  - `RequestContext.shuttingDown`, an `AbortSignal` that fires once a shutdown stops taking requests, after the
+    drain delay. Long-lived responses end on it, so their clients reconnect to an instance that stays. Ending
+    earlier would send the reconnect back to this instance, still draining, only to be ended again.
+  - During the drain delay, requests are served with `Connection: close` instead of answered 503.
+- `cache-stampede`: `invalidate()` leaves a tombstone for `lockMs` instead of deleting the key, and fills and
+  refreshes write through a compare-and-set script (one key, Redis Cluster safe).
+- `job-queue`: `createScheduler({ pool, schedules, onError })`. Without `onError`, `tick()` rejects with an
+  `AggregateError` naming the failed schedules, after enqueuing the others.
+- `data-retention-and-erasure`: `ExternalStore.erase(subjectId, signal)` and `storeTimeoutMs`; the skill now
+  vendors `with-timeout.ts`.
+- `agent-safe-db`: `audit` may return a promise, and is awaited. One round trip fewer per tool call.
+- `rag-evals`: `evaluateRetriever(golden, retrieve, k, { concurrency })` and `runJudge(cases, judge, { concurrency
+  })`, 4 calls at a time by default, results in input order (`mapInOrder` is exported).
 - `sse-streaming`:
   - `openSse(req, res, { closeOn })` ends a stream cleanly when the signal fires; pass it `ctx.shuttingDown`.
   - `formatEvent()` is exported for frameworks that write the response themselves.
@@ -147,8 +218,27 @@ missing.
   - `hybridSearch` throws a `RangeError` for a `limit` outside 1 to 100 or `candidates` outside 1 to 1,000, and
     `enqueue` for an invalid `runAt`, `priority` or `maxAttempts`. Answer them with 400.
   - BigInts in stored JSON (responses, payloads, tool results) come back as strings.
+  - Options that are NaN, negative or out of range throw a `RangeError` when a component is created. Check every
+    setting read from the environment: one that silently did nothing now stops the start.
+  - The redactor redacts more keys: any name ending in a secret word (`clientSecret`, `idToken`, `x-auth-token`),
+    and any with "passw" in it, timestamps such as `passwordUpdatedAt` included. Objects with `toJSON` are logged as
+    their JSON.
+  - `llm-gateway`: a limit or an estimate that isn't a number of dollars refuses the call; a result no longer
+    carries `question`.
+  - `data-retention-and-erasure`: copy `with-timeout.ts`. Stores get a second argument, the signal, and count as
+    pending after 30 s.
+  - `rag-evals`: retrievers and judges are called 4 at a time. Pass `{ concurrency: 1 }` to one that can't take
+    concurrent calls.
+  - `service-hardening`: a deploy no longer answers 503 during the drain delay; a test asserting that needs updating.
 
 ### Performance
+- `agent-safe-db`: a tool call takes 3 round trips instead of 4, 15% faster end to end (p50 0.597 → 0.508 ms,
+  [details](docs/performance.md#an-agents-database-tool-call--agent-safe-db)).
+- `rag-evals`: 198 queries behind an 80 ms embedding call took 16.6 s one at a time; 4.2 s at the default
+  concurrency of 4, 2.1 s at 8, with the same metrics.
+- Measured and kept: `pruneOutbox` stays one `DELETE` (batches through an index were 11× slower, with no shorter
+  statement), and the redactor keeps its per-detector hints (one union pre-check was 2.5× faster on lines without
+  PII but up to 24% slower on typical lines).
 - The redactor checks more formats, measured against 0.5.0 on the same machine
   ([details](docs/performance.md#pii-redaction-engine--pii-redaction)):
 
@@ -181,7 +271,7 @@ missing.
   unhandled rejection.
 - `npm run coverage` runs every test with coverage of the reference code and the kernel, and fails below 98% of
   lines, 90% of branches or 95% of functions. The kernel is measured once, in `shared/`, not again in every skill's
-  copy. Now: 99.5% of lines, 92.1% of branches, 96.8% of functions.
+  copy. Now: 99.5% of lines, 93.0% of branches, 96.4% of functions.
 - `npm run check` runs validate, typecheck and lint. `npm run test:<kind>` runs one folder of tests.
 - CI runs a fast `check` job without services before `verify`, and the release job runs the same checks. The Node
   version comes from `.nvmrc`.
@@ -206,7 +296,10 @@ missing.
   - an embedding provider that is down, and the ANN semantic cache;
   - a job whose lease is lost while it runs;
   - the linter's remaining rules, unsafe inventories, and a failed retrieval span.
-- 406 tests in all, up from 334.
+- `verify/tests/regressions/round-6.test.ts`: the 29 hypotheses of round 6. The checkout journey and the drain test
+  now expect a request during the drain delay to be served, with `Connection: close`.
+- New benchmarks: `bench/compare/agent-db.ts`, `eval-concurrency.ts` and `outbox-prune.ts`.
+- 436 tests in all, up from 334.
 - `verify/tests/journeys/` drives the skills end to end over real HTTP, wired the way an application wires them,
   with what people and systems do:
   - checkout: a retry after a lost answer, a double tap, a tab closed mid-payment, a deploy mid-payment, a bot;

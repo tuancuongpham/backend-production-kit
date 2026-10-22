@@ -73,6 +73,10 @@ found in it (several are classic production incidents), now fixed and guarded by
 | A 240 KB RAG prompt in a trace | oversized spans get dropped: **the biggest requests become untraceable** | bounded at 32 KiB per attribute |
 | Postgres ends a connection mid-transaction (failover, `idle_in_transaction_session_timeout`) | **the whole Node process crashes**, with every in-flight request | only that request fails; tested in every skill that holds a connection |
 | Hybrid search given a question instead of keywords ("làm sao để thanh toán qua vnpay?") | the keyword side required **every word**, so it matched **none of 10 questions** and left them all to the embeddings | every word first, any word as a fallback: the keyword side finds 10 of 10, search-box ranking unchanged |
+| LLM budget for a plan missing from the table (a NaN limit) | **no spending ceiling**: NaN compares false in JavaScript and above every amount in Postgres | the call is refused: a budget fails closed |
+| An LLM answer without token counts | priced at NaN, which **locked the tenant out of its budget for the month** | booked at the reserved estimate, and reported |
+| Secrets under camelCase or header names (`clientSecret`, `newPassword`, `x-auth-token`) | **logged in clear** | redacted by how the key name ends; token counts and cache keys kept |
+| Requests arriving during a deploy's drain delay | **a 503 for each one**: the very error the delay exists to prevent | served, with `Connection: close` so the next request goes elsewhere |
 | Outbox relay loses its database connection mid-batch | it **kept publishing the rest of the batch**, and all of it went out again on the next run | stops as soon as it sees the drop: only the message in flight goes out twice |
 | A webhook handler slower than `stuckAfterSec` (5 min) | a second worker claimed the "stuck" event and ran the handler alongside the first: **the payment was credited twice** | only the holder of the current claim may finish an event: credited once |
 | The cache store fails after the LLM already answered | treated as a provider failure: the gateway **bought the answer again** from the fallback, counted a failure against the healthy provider and left the budget reservation stuck | the answer is returned; the cache error is reported |
@@ -108,9 +112,21 @@ All of them pass now.
 
 Round 5 read round 4's code again as a reviewer, ran a type-aware linter over the whole repository, and measured
 which code no test reached. It found 21 more bugs; each hypothesis failed before its fix
-([`round-5.test.ts`](verify/tests/regressions/round-5.test.ts)). The suite now has 406 tests, organized by what they
-prove ([verify/README.md](verify/README.md)). They cover 99.5% of the reference code's lines and 92.1% of its
-branches, and CI fails below 98% and 90%.
+([`round-5.test.ts`](verify/tests/regressions/round-5.test.ts)).
+
+Round 6 looked at what arrives from configuration and from other systems as numbers, and at failures that spread.
+Its 29 hypotheses all failed before their fixes ([`round-6.test.ts`](verify/tests/regressions/round-6.test.ts)):
+- a setting read from an unset environment variable is NaN, and NaN compares false with everything. In 14 skills a
+  limit stopped limiting without an error: no load shedding, no rate limit, a budget with no ceiling, year-old
+  webhook signatures accepted. Every component now refuses it at startup;
+- one LLM answer without token counts, priced at NaN, locked its tenant out of the budget for the month;
+- `clientSecret`, `newPassword`, `idToken` and `x-auth-token` reached the logs in clear;
+- one schedule with an impossible cron expression stopped every recurring job, and one store that never answered
+  held a user's account deletion open;
+- during a deploy's drain delay, requests the load balancer still sent got a 503.
+
+The suite now has 436 tests, organized by what they prove ([verify/README.md](verify/README.md)). They cover 99.5%
+of the reference code's lines and 93.0% of its branches, and CI fails below 98% and 90%.
 
 ## Incidents it is tested against
 
@@ -126,6 +142,8 @@ The newer skills ship tests that recreate the incident, not just the happy path:
 | Database replies slow to 1 s | a server-side `statement_timeout` **never fires**; a client-side `query_timeout` fails the call in under 600 ms ([`resilience-testing`](skills/resilience-testing/SKILL.md)) |
 | A failover black-holes new connections | a pool without `connectionTimeoutMillis` was **still waiting after 2 s** (it waits forever); with 500 ms, it fails in under 1 s |
 | Redis slows down or dies | the rate limiter decides locally within 150 ms and returns to Redis once it recovers; the cache serves from the database and reports the outage |
+| A deploy forgot an environment variable | the component **refuses to start**, naming the setting. Before, `Number(undefined)` was NaN and the limit silently vanished: a NaN grace period cut every request when the deploy began, a NaN limiter timeout let everything through |
+| A price changes while a request is reading it | the slow read can't write the old price back after `invalidate()`: the cache's writes are compare-and-set ([`cache-stampede`](skills/cache-stampede/SKILL.md)) |
 
 ## Faster, and measured against the alternatives
 
@@ -148,6 +166,9 @@ reference code ships the winner ([every table, plan and trade-off](docs/performa
 | Semantic cache lookup in shadow mode | before the model call vs beside it | beside it | 108 ms per request instead of 206 ms (100 ms embedding, 100 ms model) |
 | A black-holed Redis behind the cache | a 50 ms timeout per request vs a circuit breaker | breaker | 20 requests: 181 ms instead of 1,236 ms |
 | Tenant transaction (RLS) | 4 round trips vs 3 | 3 | 19% faster per request; RLS itself costs ~0 |
+| Agent database tool call | 4 round trips vs 3 | 3 | 15% faster per call (p50 0.60 → 0.51 ms) |
+| Retrieval eval in CI | one query at a time vs 4 or 8 at once | 4 (default) | 198 queries: 16.6 s → 4.2 s, same metrics |
+| Outbox retention | one `DELETE` vs batches vs batches through an index | one `DELETE` (kept) | batches were 11× slower, with no shorter statement |
 | Rate limiter client | ioredis defaults vs auto-pipelining | defaults (kept) | auto-pipelining was 11% slower |
 | PII redaction | hints vs no hints vs one combined regex | hints (kept) | 1.3–4.7× faster than the alternatives |
 
@@ -215,7 +236,7 @@ reference code, the properties that must be proven by tests, and the mistakes it
   the core.
 - **A small shared kernel** (transactions that survive a dead connection, a half-open circuit breaker, deadlines,
   worker loops, text made storable, hooks that can't break the work), vendored into each skill and kept identical by CI.
-- **Twelve invariants** every skill keeps, each one a bug this kit once had: [docs/architecture.md](docs/architecture.md).
+- **Fourteen invariants** every skill keeps, each one a bug this kit once had: [docs/architecture.md](docs/architecture.md).
 
 ## Run the checks yourself
 

@@ -86,16 +86,25 @@ Each of these was a bug in this kit, found by a failing test first. The fix is t
    query timeout.
 3. **Every wait has a deadline.** That means `withTimeout`, `AbortSignal.timeout`, `query_timeout` and
    `connectionTimeoutMillis`. A server-side `statement_timeout` limits the work, not a slow or black-holed network.
+   It holds for the app's own callbacks too: an erasure's external store that never answered held the user's
+   "delete my account" request open, and every request claimed beside it.
 4. **A breaker lets one probe through after its cooldown.** Letting the whole backlog through makes each request
    wait out the full timeout of a dependency that is still down.
 5. **Optional infrastructure fails open and never turns a success into a failure.** This covers caches,
    embeddings, usage sinks and tracing; their errors go to `onError`. Controls fail closed: budget reservations,
-   approvals, Row-Level Security.
+   approvals, Row-Level Security, audits. A control fails closed on a value it can't trust too: a budget limit that
+   is NaN (a plan missing from the table) lifted the limit, since NaN compares false in JavaScript and above
+   everything in Postgres `numeric`, and an answer without token counts, priced at NaN, locked its tenant out for the
+   month. An unknown cost is booked at the estimate.
 6. **Work that already happened is not redone because of an error after it.** When the model has answered and
    the cache write fails, the gateway returns the answer. It doesn't buy a second one from the fallback provider.
 7. **Configuration is checked at construction.** This covers breaker thresholds, provider names and prices,
    inventory coverage (an anonymized row must lose every personal column) and regex flags (a non-global detector
-   redacts only the first match).
+   redacts only the first match). It covers every number: `Number(process.env.X)` of an unset variable is NaN,
+   and NaN compares false with everything, so a limit stops limiting without an error. A NaN `maxInFlight` shed
+   nothing, a NaN grace period cut every request at the start of a deploy, a NaN worker `loops` ran no loop, a NaN
+   replay window accepted year-old webhooks, a NaN heartbeat pinged every millisecond. Each component refuses NaN,
+   out-of-range values and a percentage where a ratio belongs with a `RangeError` before it starts.
 8. **State that outlives a request lives outside process memory.** That includes the taint of an agent session
    (its next turn may hit another instance) and event ids that must survive a restart.
 9. **Untrusted text is inserted with a replacer function, never a replacement string.** In
@@ -114,6 +123,13 @@ Each of these was a bug in this kit, found by a failing test first. The fix is t
     rejects with, is dropped. Called bare, an alert that failed turned a recorded dead letter into an exception, an
     async one rejecting while Slack was down ended the process, and a logger that threw stopped a worker loop.
     To stop work, pass a signal, not a hook that throws.
+13. **One item's failure stays with that item.** A schedule whose `next()` returned an Invalid Date (an impossible
+    cron expression) failed the step that fires every schedule, so all recurring jobs stopped. Each schedule, each
+    external store and each tool call is now reported and retried on its own while the others go on.
+14. **A write based on an earlier read lands only if what it read still holds.** A cache fill that read a row
+    before a change and finished after the change's invalidation wrote the old row back for a whole TTL. The
+    cache's writes are compare-and-set against what the writer saw, and invalidation leaves a tombstone. Claims
+    with tokens (invariant 1) are the same rule for rows a worker owns.
 
 ## Testing seams
 
@@ -125,7 +141,7 @@ Each of these was a bug in this kit, found by a failing test first. The fix is t
   Redis and Toxiproxy:
   - `skills/<skill>.test.ts` prove what each skill's SKILL.md claims; `kernel/` the shared building blocks.
   - `regressions/round-N.test.ts` hold each review round's hypotheses. Every one failed on the code before its fix:
-    34 in round 3, 25 in round 4, 21 in round 5.
+    34 in round 3, 25 in round 4, 21 in round 5, 29 in round 6.
   - `journeys/` drive several skills end to end over real HTTP, wired as an application wires them, through what
     users, providers and models do: retries, double taps, closed tabs, deploys, forged requests, edited URLs.
   - `properties/` check rules over generated input (fast-check): personal data in any format never survives

@@ -182,6 +182,26 @@ re-publishes the batch and consumers dedup. C matches B; the per-message publish
 **Shipped:** batch marking (8.3×). Batch size stays at 100. With a real broker, publish latency dominates, and
 bigger batches mean longer lock holds and bigger re-publishes after a crash.
 
+### Outbox retention · `outbox-pattern`
+
+`pruneOutbox` is one `DELETE`, while the other skills prune in batches of 5,000 through an index. The daily run was
+measured both ways on a table holding eight days of traffic, one of them past the 7-day window: 440,000 recent
+messages, 60,000 to delete and 1,000 unpublished, in random physical order. That is the steady state, once VACUUM has
+freed space all over the table and new messages have filled it ([`outbox-prune.ts`](../bench/compare/outbox-prune.ts)):
+
+| Variant | Statements | Total | Longest statement |
+|---|---|---|---|
+| A. one `DELETE` (shipped) | 1 | **98 ms** | **98 ms** |
+| B. batches of 5,000 | 13 | 1,142 ms | 123 ms |
+| C. batches of 5,000 through an index on `published_at` | 13 | 1,250 ms | 125 ms |
+
+The index would also cost every publish an index entry; the relay ran at 26,229 messages/s without it and 27,705
+with it, which is within run-to-run noise.
+
+**Shipped:** unchanged, measured. Batching made the run 11× slower, and not even its longest statement was shorter:
+each batch's subquery scans for scattered rows again. At a day's traffic the single statement is short. Revisit
+when one day's rows take seconds to delete.
+
 ### LLM budget reservation · `llm-gateway`
 
 The reservation runs before every paid model call:
@@ -223,6 +243,22 @@ Second, what a request pays end to end for a primary-key lookup:
 feeds it injection strings. The policy function stays `LANGUAGE sql STABLE`, and the skill now warns about
 `VOLATILE`. The 19% shown here comes from a sub-millisecond network; across availability zones each round trip
 costs more, so the saving grows.
+
+### An agent's database tool call · `agent-safe-db`
+
+The executor opens a read-only transaction, sets the tenant and a statement timeout, runs the developer's query and
+commits. A primary-key lookup on 50,000 orders, three interleaved rounds of 2,000 calls, median round
+([`agent-db.ts`](../bench/compare/agent-db.ts)):
+
+| Variant | p50 | p95 |
+|---|---|---|
+| A. `BEGIN READ ONLY` / `set_config(…)` / query / `COMMIT`: 4 round trips (0.5.0) | 0.597 ms | 0.826 ms |
+| B. `BEGIN READ ONLY; SELECT set_config(…)` in one call / query / `COMMIT`: 3 round trips | 0.466 ms | 0.658 ms |
+| C. shipped `createAgentDb().run()` (B, with the parameter checks and the audit) | **0.508 ms** | **0.697 ms** |
+
+**Shipped:** shape B, 15% faster per call end to end (22% for the transaction alone), the same trick as
+`withTenant`. The tenant id is inlined only after the strict UUID check, and the timeout is an integer checked at
+startup.
 
 ### Claiming an idempotency key · `idempotency-keys`
 
@@ -313,6 +349,10 @@ back:
 - a pre-check shared by neighbouring detectors (cards, ids, phones) runs once per line, because it fails again
   until a detector changes the text.
 
+Round 6 tried one more: the union of every detector's hint as a single early exit. Lines without PII got 2.5×
+faster, but typical lines got 8–24% slower: most of them contain something a hint matches (a digit run, `key=`,
+`token`), so they paid the union and then every hint anyway. **Not shipped.**
+
 ### Schema changes on a live table · `zero-downtime-migrations`
 
 A 1,000,000-row table that the app keeps reading and writing. A probe query arrives while each change runs, and the
@@ -389,6 +429,22 @@ recall@5 from 1.00 to 0.42 and MRR from 1.00 to 0.25. The slices show where: acc
 unaccented ones stayed at 1.00. `compareReports` failed the gate and listed the 7 queries that broke.
 
 **Shipped:** the fallback in `hybridSearch`.
+
+### The retrieval eval in CI · `rag-evals`
+
+The eval runs on every pull request, so its wall time decides whether people keep it. The same help center and
+hybrid search, behind an embedding call (80 ms, simulated: a hosted embedding model), with the 22 golden queries
+repeated to 198 ([`eval-concurrency.ts`](../bench/compare/eval-concurrency.ts)):
+
+| `concurrency` | Queries | Wall time | Same metrics |
+|---|---|---|---|
+| 1 (0.5.0 ran one query at a time) | 198 | 16.6 s | yes |
+| 4 (default) | 198 | **4.2 s** | yes |
+| 8 | 198 | 2.1 s | yes |
+
+**Shipped:** `evaluateRetriever` and `runJudge` run 4 calls at a time by default, results in input order.
+`{ concurrency: 1 }` keeps the old behaviour for a retriever that can't take concurrent calls. The judge gains more:
+its calls take a second or more each.
 
 ## Before/after 0.2.0
 

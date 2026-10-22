@@ -81,6 +81,9 @@ Toxiproxy service containers.
 - **A property failed?** Its message prints a seed. `KIT_FC_SEED=<seed> npm run test:properties` reproduces it,
   and `KIT_FC_SEED=random KIT_FC_RUNS=5000 npm run test:properties` explores further.
 - **Changed a file in `shared/`?** Run `npm run sync:shared`, and add or update its test in `verify/tests/kernel/`.
+- **Added a numeric option?** Check it in the constructor and throw a `RangeError` for NaN and for values out of
+  range. Apps read options with `Number(process.env.X)`, which is NaN when the variable is unset, and NaN compares
+  false with everything: an unchecked limit turns itself off without an error.
 
 ## Releasing
 

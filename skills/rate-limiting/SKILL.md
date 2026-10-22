@@ -27,7 +27,7 @@ LLM *token or cost* budgets are a separate concern; see the `llm-gateway` skill.
    - configure ioredis with `enableOfflineQueue: false`, `maxRetriesPerRequest: 1`, `commandTimeout: 50`. Otherwise commands **queue while disconnected** and requests hang;
    - with the offline queue off, a command sent before the connection is ready fails at once. Connect (`lazyConnect: true`, then `await redis.connect()`) before the instance reports ready, or the first requests after every deploy run in the failure mode;
    - `timeoutMs` races each check, and the losing promise is caught so a late rejection can't crash Node;
-   - the circuit breaker stops calling Redis after N consecutive failures for a cooldown, so a dead Redis costs 0 ms instead of 50 ms per request. When the cooldown ends, **one** check probes Redis while the others keep using the failure mode at once; without that half-open state, every request in flight at that moment paid the full timeout again. The breaker is the kit's shared `circuit-breaker.ts`: copy it, and `with-timeout.ts`, along with `limiter.ts`;
+   - the circuit breaker stops calling Redis after N consecutive failures for a cooldown, so a dead Redis costs 0 ms instead of 50 ms per request. When the cooldown ends, **one** check probes Redis while the others keep using the failure mode at once; without that half-open state, every request in flight at that moment paid the full timeout again. The breaker is the kit's shared `circuit-breaker.ts`: copy it, `hooks.ts` and `with-timeout.ts` along with `limiter.ts`;
    - `check(subject, cost)` refuses a `cost` that isn't in (0, capacity]: a negative cost would add tokens, and one above capacity could never pass;
    - `local` mode keeps a per-instance bucket of `capacity / instances`. That is approximate, but still bounded;
    - keys look like `rl:{subject}`. The hash tag keeps Redis Cluster happy;
@@ -67,3 +67,8 @@ ADR: failure mode per endpoint class (with the reason), subject choice, limits p
 - Evicting the local fallback map in insertion order. JavaScript's `Map.set` on an existing key keeps its old position, so the *busiest* subject is the oldest entry and the first to be evicted, coming back with a full bucket during an outage. Delete and re-insert on every access (true LRU).
 - Sending the whole Lua script on every request. Use `EVALSHA` with an `EVAL` fallback on `NOSCRIPT` (after a restart or failover). This saves bandwidth on real networks; on localhost the difference is not measurable.
 - A "fixed quota" modelled as a bucket with `refillPerSec: 0`. The script divides by zero, every check errors, and the endpoint runs fail-open or fail-closed while dashboards show Redis as healthy. Use a tiny refill rate on a long-lived key.
+- Limiting login attempts by the email as typed. `Lan@Shop.vn` and `lan@shop.vn` get separate buckets, so a
+  credential-stuffing script varies the case to reset its limit. Normalize the subject the way the login lookup
+  does (trim, lower-case, NFC) before `check()`.
+- An `onRedisError` metrics hook that throws: called bare, it fails the request instead of letting the failure mode
+  decide. Hooks go through `callHook`.

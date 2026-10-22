@@ -7,6 +7,7 @@ import { createHash } from 'node:crypto';
 import { readFileSync } from 'node:fs';
 import type { Redis } from 'ioredis';
 import { CircuitBreaker } from './circuit-breaker.ts';
+import { callHook } from './hooks.ts';
 import { withTimeout } from './with-timeout.ts';
 
 const LUA = readFileSync(new URL('./token-bucket.lua', import.meta.url), 'utf8');
@@ -37,7 +38,7 @@ export interface LimiterOptions {
   breakerThreshold?: number; // default 5
   breakerCooldownMs?: number; // default 5000
   keyPrefix?: string; // default 'rl'
-  onRedisError?: (err: unknown) => void;
+  onRedisError?: (err: unknown) => unknown;
   now?: () => number; // injectable for tests
 }
 
@@ -90,7 +91,7 @@ export class RateLimiter {
   readonly #failureMode: FailureMode;
   readonly #timeoutMs: number;
   readonly #prefix: string;
-  readonly #onRedisError?: (err: unknown) => void;
+  readonly #onRedisError?: (err: unknown) => unknown;
   readonly #breaker: CircuitBreaker;
   readonly #local: LocalBuckets;
   #redisCalls = 0;
@@ -127,7 +128,7 @@ export class RateLimiter {
       this.#breaker.success();
       return { allowed: allowed === 1, remaining, retryAfterMs, source: 'redis' };
     } catch (err) {
-      this.#onRedisError?.(err);
+      callHook(this.#onRedisError, err); // a metrics hook that fails can't change the decision
       this.#breaker.failure();
       return this.#fallback(key, cost);
     }

@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import pg from 'pg';
 import { Redis } from 'ioredis';
 import { REDIS_URL, freshDatabase, runSqlFile } from '../support/infra.ts';
-import { createDataLifecycle, type ExternalStore, type InventoryEntry } from '../../../skills/data-retention-and-erasure/references/erasure.ts';
+import { checkInventory, createDataLifecycle, type ExternalStore, type InventoryEntry } from '../../../skills/data-retention-and-erasure/references/erasure.ts';
 
 let pool: pg.Pool;
 let redis: Redis;
@@ -162,5 +162,22 @@ describe('data-retention-and-erasure', () => {
     ]);
     assert.deepEqual(await lifecycle.auditInventory({ reviewed: ['newsletter_signups.email', 'newsletter_signups.ho_ten', 'newsletter_signups.so_dien_thoai'] }), []);
     await pool.query(`DROP TABLE newsletter_signups`);
+  });
+
+  it('an inventory that would leave personal data behind, or fail on every request, is refused at startup', () => {
+    const unsafe: InventoryEntry[] = [
+      // a kept order whose shipping address nobody overwrites
+      { table: 'orders', subjectColumn: 'user_id', personal: ['shipping_address'], onErase: 'anonymize', anonymize: { user_id: 'NULL' } },
+      // retention without the column to measure it by
+      { table: 'chat_messages', subjectColumn: 'user_id', personal: ['content'], onErase: 'delete', retentionDays: 90 },
+      // a name that would be SQL, not an identifier
+      { table: 'users; DROP TABLE users', subjectColumn: 'id', personal: [], onErase: 'delete' },
+    ];
+    assert.deepEqual(checkInventory(unsafe), [
+      'orders.shipping_address is kept as is on erasure: add it to anonymize',
+      'chat_messages: retentionDays needs a positive whole number of days and a timeColumn',
+      'users; DROP TABLE users: "users; DROP TABLE users" is not a plain identifier',
+    ]);
+    assert.throws(() => createDataLifecycle({ pool, inventory: unsafe, pepper: 'test-pepper' }), /unsafe inventory/);
   });
 });

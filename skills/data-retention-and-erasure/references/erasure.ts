@@ -5,6 +5,7 @@
 import { createHash } from 'node:crypto';
 import type pg from 'pg';
 import { withTransaction } from './pg-transaction.ts';
+import { pgJson } from './pg-values.ts';
 
 export interface InventoryEntry {
   table: string;
@@ -134,8 +135,8 @@ export class DataLifecycle {
           subjectId,
           createHash('sha256').update(this.#pepper).update(subjectId).digest('hex'),
           this.#dueDays,
-          JSON.stringify(rows),
-          JSON.stringify(Object.fromEntries(this.#stores.map((s) => [s.name, { status: 'pending', attempts: 0 }]))),
+          pgJson(rows),
+          pgJson(Object.fromEntries(this.#stores.map((s) => [s.name, { status: 'pending', attempts: 0 }]))),
           this.#leaseSec,
         ],
       );
@@ -235,7 +236,7 @@ export class DataLifecycle {
               completed_at = CASE WHEN $4 THEN now() END,
               subject_id = CASE WHEN $4 THEN NULL ELSE subject_id END
         WHERE id = $1 AND lease_id = $2`,
-      [claim.id, claim.lease_id, JSON.stringify(state), done],
+      [claim.id, claim.lease_id, pgJson(state), done], // store errors come from outside and may hold a NUL
     );
     return res.rowCount === 1 ? pending : null;
   }

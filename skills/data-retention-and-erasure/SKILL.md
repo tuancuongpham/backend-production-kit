@@ -43,7 +43,7 @@ auditInventory()       â†’ personal-looking columns that no one has classified â
    - `createDataLifecycle` checks the inventory at startup (`checkInventory`) and refuses an unsafe one. An
      `anonymize` entry must overwrite every `personal` column and the subject column, or the kept row still
      identifies the person. Names must be plain identifiers, and retention needs a time column.
-   - Copy `pg-transaction.ts` along with `erasure.ts`: it is the kit's shared transaction helper.
+   - Copy `pg-transaction.ts` and `pg-values.ts` along with `erasure.ts`: the kit's shared transaction helper, and the one that makes stored values hold any text.
 2. **Tables.** Add [references/erasure.sql](references/erasure.sql). The `erasure_requests` row records what was done
    per table and per store. Once every store is done it keeps only the hash.
 3. **Wire the request path.** "Delete my account" (after re-authentication) calls `requestErasure(userId)`, and the
@@ -105,3 +105,7 @@ stores and how each is erased, backup policy.
 - Letting two schedulers process the same request. The slower one wrote back "pending" after the faster one had
   completed it and cleared the subject id, and the request then retried forever with nobody to erase.
 - No retention: data kept "just in case" is data you must find, export and erase later.
+- Forgetting the operational tables that hold the subject's id: idempotency keys (their `scope`), job payloads,
+  outbox events, the webhook inbox, audit logs. Inventory each one with its retention.
+- Erasing a cached copy by letting it expire. Until then the deleted person's profile is still served; list the
+  cache as an external store whose `erase` invalidates the key.

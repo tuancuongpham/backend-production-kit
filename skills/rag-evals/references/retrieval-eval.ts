@@ -71,6 +71,7 @@ const mean = (xs: number[]) => (xs.length ? xs.reduce((a, b) => a + b, 0) / xs.l
 const round = (x: number) => Math.round(x * 1000) / 1000;
 
 export async function evaluateRetriever(golden: GoldenQuery[], retrieve: Retriever, k = 5): Promise<Report> {
+  if (!Number.isInteger(k) || k < 1) throw new RangeError(`evaluateRetriever: k must be a positive integer, got ${k}`);
   const perQuery: QueryResult[] = [];
   let precision = 0;
   for (const q of golden) {
@@ -136,6 +137,8 @@ export function compareReports(baseline: Report, candidate: Report, gate: Gate =
   const tags = [...new Set(shared.flatMap((id) => before.get(id)!.tags))];
   const slices = tags.map((tag) => ({ tag, delta: delta(shared.filter((id) => before.get(id)!.tags.includes(tag)), (r) => r.recall) }));
   const failures = [
+    // recall@10 against recall@5 always looks like progress: a pull request that changes k must not pass for it.
+    ...(baseline.k !== candidate.k ? [`the runs use different k (${baseline.k} and ${candidate.k}): their metrics can't be compared`] : []),
     ...(shared.length === 0 ? ['the two runs share no queries: nothing to compare'] : []),
     ...(deltas.recall < -(gate.maxRecallDrop ?? 0.02) ? [`recall@${candidate.k} fell by ${-deltas.recall}`] : []),
     ...(deltas.mrr < -(gate.maxMrrDrop ?? 0.02) ? [`MRR fell by ${-deltas.mrr}`] : []),

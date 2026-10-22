@@ -47,7 +47,8 @@ golden set (real queries → relevant chunk ids, tagged by type)
    as a PR comment, and fail the job when `pass` is false. The comment lists the queries that lost results, which
    is where debugging starts. Both runs are compared on the queries they share, and added or removed queries are
    listed: a pull request that adds hard questions to the golden set lowers the average without anything getting
-   worse, and must not fail the gate for it.
+   worse, and must not fail the gate for it. Two runs with a different `k` fail the gate. recall@10 against the
+   baseline's recall@5 always looks like progress, so a pull request that changes `k` re-scores main with it.
 4. **Judge answers** with [references/judge.ts](references/judge.ts).
    - Ask one property at a time (`GROUNDEDNESS_PROMPT`: is every claim supported by the context?).
    - Before trusting a judge, run it on human-labelled answers and check `judgeAgreement(…)`: kappa, and above all

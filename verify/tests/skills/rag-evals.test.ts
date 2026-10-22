@@ -73,6 +73,30 @@ describe('rag-evals', () => {
     assert.ok(Math.abs(ndcgAtK(['x', 'a'], ['a'], 5) - 1 / Math.log2(3)) < 1e-12);
   });
 
+  it('queries run several at a time, the report keeps their order, and a retriever that fails stops the run', async () => {
+    let inFlight = 0;
+    let most = 0;
+    const slow = async (q: GoldenQuery) => {
+      most = Math.max(most, ++inFlight);
+      await new Promise((r) => setTimeout(r, 10));
+      inFlight--;
+      return q.relevant;
+    };
+    const set = Array.from({ length: 12 }, (_, i) => ({ id: `q${i}`, query: `câu hỏi ${i}`, relevant: [`c${i}`] }));
+    const report = await evaluateRetriever(set, slow, 5, { concurrency: 4 });
+    assert.deepEqual([most, report.recall, report.perQuery.map((r) => r.id)], [4, 1, set.map((q) => q.id)]);
+    let started = 0;
+    const failing = async (q: GoldenQuery) => {
+      started++;
+      if (q.id === 'q1') throw new Error('embedding API 503');
+      await new Promise((r) => setTimeout(r, 20));
+      return q.relevant;
+    };
+    await assert.rejects(evaluateRetriever(set, failing, 5, { concurrency: 2 }), /embedding API 503/);
+    await new Promise((r) => setTimeout(r, 60));
+    assert.ok(started < set.length, `stopped starting queries after the failure (${started} of ${set.length})`);
+  });
+
   it('the gate catches a real regression in Postgres hybrid search: accented queries break when unaccent is dropped', async () => {
     const baseline = await evaluateRetriever(golden, shipped, 5);
     assert.equal(baseline.recall, 1, JSON.stringify(baseline.perQuery.filter((r) => r.recall < 1)));

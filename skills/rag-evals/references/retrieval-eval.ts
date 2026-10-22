@@ -70,12 +70,44 @@ export interface Report {
 const mean = (xs: number[]) => (xs.length ? xs.reduce((a, b) => a + b, 0) / xs.length : 0);
 const round = (x: number) => Math.round(x * 1000) / 1000;
 
-export async function evaluateRetriever(golden: GoldenQuery[], retrieve: Retriever, k = 5): Promise<Report> {
+export interface RunOptions {
+  /**
+   * Calls in flight at once (default 4). The eval runs on every pull request, and a golden set of a few hundred
+   * queries against a real index, or a judge model at a second per answer, takes minutes one call at a time. Use 1
+   * for a retriever or judge that can't take concurrent calls. Results keep the input order either way.
+   */
+  concurrency?: number;
+}
+
+/** `fn` over `items`, at most `concurrency` at a time, results in input order. Stops starting new calls after a failure. */
+export async function mapInOrder<T, R>(items: T[], fn: (item: T) => Promise<R>, opts: RunOptions = {}): Promise<R[]> {
+  const concurrency = opts.concurrency ?? 4;
+  if (!Number.isInteger(concurrency) || concurrency < 1) throw new RangeError(`concurrency must be a positive integer, got ${concurrency}`);
+  const out = new Array<R>(items.length);
+  let next = 0;
+  let failed = false;
+  const lane = async () => {
+    while (!failed && next < items.length) {
+      const i = next++;
+      try {
+        out[i] = await fn(items[i]);
+      } catch (err) {
+        failed = true;
+        throw err;
+      }
+    }
+  };
+  await Promise.all(Array.from({ length: Math.min(concurrency, items.length) }, lane));
+  return out;
+}
+
+export async function evaluateRetriever(golden: GoldenQuery[], retrieve: Retriever, k = 5, opts: RunOptions = {}): Promise<Report> {
   if (!Number.isInteger(k) || k < 1) throw new RangeError(`evaluateRetriever: k must be a positive integer, got ${k}`);
+  const results = await mapInOrder(golden, async (q) => unique(await retrieve(q)).slice(0, k), opts);
   const perQuery: QueryResult[] = [];
   let precision = 0;
-  for (const q of golden) {
-    const retrieved = unique(await retrieve(q)).slice(0, k);
+  for (const [i, q] of golden.entries()) {
+    const retrieved = results[i];
     precision += precisionAtK(retrieved, q.relevant, k);
     perQuery.push({
       id: q.id,
@@ -122,6 +154,11 @@ export interface Gate {
  * removed queries are listed instead.
  */
 export function compareReports(baseline: Report, candidate: Report, gate: Gate = {}) {
+  // A threshold read from an unset environment variable is NaN, and `drop < -NaN` is never true: the gate would pass
+  // every regression. Refuse it, so the CI job fails loudly instead.
+  for (const [name, v] of Object.entries(gate)) {
+    if (v !== undefined && (!Number.isFinite(v) || v < 0)) throw new RangeError(`compareReports: gate.${name} must be a number, 0 or more, got ${v}`);
+  }
   const before = new Map(baseline.perQuery.map((r) => [r.id, r]));
   const after = new Map(candidate.perQuery.map((r) => [r.id, r]));
   const shared = candidate.perQuery.filter((r) => before.has(r.id)).map((r) => r.id);

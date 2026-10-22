@@ -1,0 +1,26 @@
+{
+  "name": "eval-concurrency",
+  "date": "2026-10-22T19:50:22.646Z",
+  "node": "v24.22.1",
+  "embeddingMs": 80,
+  "rows": [
+    {
+      "concurrency": "1 (0.5.0)",
+      "queries": 198,
+      "seconds": 16.6,
+      "same metrics": "yes"
+    },
+    {
+      "concurrency": "4 (default)",
+      "queries": 198,
+      "seconds": 4.2,
+      "same metrics": "yes"
+    },
+    {
+      "concurrency": "8",
+      "queries": 198,
+      "seconds": 2.1,
+      "same metrics": "yes"
+    }
+  ]
+}

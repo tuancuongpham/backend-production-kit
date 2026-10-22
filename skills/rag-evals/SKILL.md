@@ -43,17 +43,25 @@ golden set (real queries → relevant chunk ids, tagged by type)
    ranked ids, so the same harness checks hybrid search, each retriever alone, a reranker or a new embedding model.
    Score each retriever alone too: the fused number hides which side does the work. Duplicate ids count once, so
    evaluating at the document level (chunks mapped to their documents) can't push recall above 1.
+   Queries run 4 at a time by default (`{ concurrency }`, results in input order): 198 queries behind an 80 ms
+   embedding call took 16.6 s one by one, 4.2 s at 4 and 2.1 s at 8, with the same metrics
+   ([performance](../../docs/performance.md)). Pass `{ concurrency: 1 }` for a retriever that can't take concurrent
+   calls.
 3. **Gate in CI.** Score main and the branch, then call `compareReports(baseline, candidate)`. Post `toMarkdown(…)`
    as a PR comment, and fail the job when `pass` is false. The comment lists the queries that lost results, which
    is where debugging starts. Both runs are compared on the queries they share, and added or removed queries are
    listed: a pull request that adds hard questions to the golden set lowers the average without anything getting
    worse, and must not fail the gate for it. Two runs with a different `k` fail the gate. recall@10 against the
    baseline's recall@5 always looks like progress, so a pull request that changes `k` re-scores main with it.
+   A gate threshold that isn't a number of 0 or more throws: read with `Number(process.env.MAX_DROP)` and unset, it
+   is NaN, and `drop < -NaN` is never true, so the gate passed every regression.
 4. **Judge answers** with [references/judge.ts](references/judge.ts).
    - Ask one property at a time (`GROUNDEDNESS_PROMPT`: is every claim supported by the context?).
    - Before trusting a judge, run it on human-labelled answers and check `judgeAgreement(…)`: kappa, and above all
      `falsePasses`.
    - Re-check when the judge model or prompt changes.
+   - `runJudge` also calls the judge 4 at a time by default: at a second or more per judge call, one at a time is
+     the slowest step of the eval.
 5. **Close the loop.** Log retrieval ranks and judge verdicts on traces (`llm-observability`). Production queries
    that users flag become golden-set candidates.
 
@@ -92,6 +100,8 @@ ADR: golden set source, size and refresh cadence, slices, k, gate thresholds, ju
   - The fused result hid it, because embeddings carried those questions.
   - `multitenant-postgres` now falls back to any-word matching (10 of 10).
 - A golden set written by the developer who wrote the chunks.
+- Running the eval one query at a time. It runs on every pull request, and a set of a few hundred queries behind an
+  embedding API took minutes; so people stopped running it.
 - Comparing against a fixed threshold instead of against main: the number drifts with the corpus, and nobody knows
   whether a change helped.
 - Trusting an LLM judge's pass rate without measuring it against humans. It fails in one direction: it passes

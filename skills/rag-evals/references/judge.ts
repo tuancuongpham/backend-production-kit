@@ -1,5 +1,6 @@
 // LLM-as-judge for answers: grade each answer against the context it was given, and measure how often the judge
 // agrees with human labels before its scores are allowed to gate anything.
+import { mapInOrder, type RunOptions } from './retrieval-eval.ts';
 
 export interface JudgeCase {
   id: string;
@@ -43,9 +44,9 @@ export const fillPrompt = (c: JudgeCase) => {
   return GROUNDEDNESS_PROMPT.replace(/\{\{(context|question|answer)\}\}/g, (_, name: string) => values[name]);
 };
 
-export async function runJudge(cases: JudgeCase[], judge: Judge) {
-  const results: Array<JudgeCase & { verdict: Verdict; reason: string }> = [];
-  for (const c of cases) results.push({ ...c, ...(await judge(c)) });
+/** Grades every case, `concurrency` judge calls at a time (default 4): at about a second per call, one at a time is slow. */
+export async function runJudge(cases: JudgeCase[], judge: Judge, opts: RunOptions = {}) {
+  const results = await mapInOrder(cases, async (c) => ({ ...c, ...(await judge(c)) }), opts);
   return { results, passRate: results.filter((r) => r.verdict === 'pass').length / Math.max(1, results.length) };
 }
 

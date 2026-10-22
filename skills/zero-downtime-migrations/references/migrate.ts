@@ -35,8 +35,9 @@ const LOCK_NOT_AVAILABLE = '55P03';
 /** Errors after which the same statement can simply run again: deadlock, serialization failure, lock timeout. */
 const TRANSIENT = new Set(['40P01', '40001', LOCK_NOT_AVAILABLE]);
 const codeOf = (err: unknown) => (err as { code?: string }).code;
-const ms = (n: number, name: string) => {
-  if (!Number.isInteger(n) || n < 0) throw new Error(`${name} must be a non-negative integer`);
+/** A setting: an integer of at least `min`. From an unset environment variable it is NaN, and a NaN attempt count retries forever. */
+const ms = (n: number, name: string, min = 0) => {
+  if (!Number.isInteger(n) || n < min) throw new RangeError(`${name} must be an integer of at least ${min}, got ${n}`);
   return n;
 };
 /** Doubling from `base` up to 30 s, with jitter. */
@@ -49,17 +50,22 @@ const backoff = (attempt: number, base: number) => {
 export async function runStep(pool: pg.Pool, step: Step, o: StepOptions = {}): Promise<{ attempts: number }> {
   const lockTimeout = ms(o.lockTimeoutMs ?? 2000, 'lockTimeoutMs');
   const statementTimeout = ms(o.statementTimeoutMs ?? 0, 'statementTimeoutMs');
-  const attempts = o.attempts ?? 10;
+  const attempts = ms(o.attempts ?? 10, 'attempts', 1);
+  const baseDelayMs = ms(o.baseDelayMs ?? 1000, 'baseDelayMs');
   const concurrently = step.concurrently ?? /\bCONCURRENTLY\b/i.test(step.sql);
   const run = concurrently
     ? // Can't run in a transaction: session settings instead, reset afterwards since the connection goes back to a pool.
       () =>
         withClient(pool, async (client) => {
           await client.query(`SET lock_timeout = ${lockTimeout}; SET statement_timeout = ${statementTimeout}`);
+          const build = concurrentIndexBuild(step.sql);
+          // An unnamed index gets a generated name, which this attempt can only find as an INVALID index that wasn't
+          // there before it.
+          const before = build && !build.name ? await invalidIndexes(client, build.table) : [];
           try {
             await client.query(step.sql);
           } catch (err) {
-            await dropInvalidIndex(client, step.sql);
+            if (build) await dropInvalidIndex(client, build, before);
             throw err;
           } finally {
             await client.query('RESET lock_timeout; RESET statement_timeout').catch(() => {});
@@ -73,23 +79,38 @@ export async function runStep(pool: pg.Pool, step: Step, o: StepOptions = {}): P
     } catch (err) {
       if (codeOf(err) !== LOCK_NOT_AVAILABLE || attempt >= attempts) throw err;
       callHook(o.onRetry, step, attempt, err);
-      await sleep(backoff(attempt, o.baseDelayMs ?? 1000));
+      await sleep(backoff(attempt, baseDelayMs));
     }
   }
+}
+
+/** The index a CREATE INDEX CONCURRENTLY statement builds: its name (absent when Postgres generates one) and table. */
+function concurrentIndexBuild(sql: string): { name?: string; table: string } | null {
+  const m = /CREATE\s+(?:UNIQUE\s+)?INDEX\s+CONCURRENTLY\s+(?:IF\s+NOT\s+EXISTS\s+)?(?:(?!ON\b)("?[\w.]+"?)\s+)?ON\s+(?:ONLY\s+)?("?[\w.]+"?)/i.exec(sql);
+  return m ? { name: m[1], table: m[2] } : null;
+}
+
+async function invalidIndexes(client: pg.PoolClient, table: string): Promise<string[]> {
+  const { rows } = await client
+    .query(`SELECT indexrelid::regclass::text AS name FROM pg_index WHERE indrelid = to_regclass($1) AND NOT indisvalid`, [table])
+    .catch(() => ({ rows: [] as Array<{ name: string }> }));
+  return rows.map((r) => r.name);
 }
 
 /**
  * A CREATE INDEX CONCURRENTLY that fails (a duplicate for a unique index, a lock or statement timeout, a
  * cancel) leaves its index behind, marked INVALID. Writes keep maintaining it, the planner never uses it, and
- * re-running the same statement fails on the name. Drop it so the step can be retried.
+ * re-running the same statement fails on the name. Drop it so the step can be retried. An unnamed one is the INVALID
+ * index on the table that wasn't there before the attempt: each retry would leave another (t_c_idx1, t_c_idx2…).
  */
-async function dropInvalidIndex(client: pg.PoolClient, sql: string) {
-  const m = /CREATE\s+(?:UNIQUE\s+)?INDEX\s+CONCURRENTLY\s+(?:IF\s+NOT\s+EXISTS\s+)?("?[\w.]+"?)/i.exec(sql);
-  if (!m) return;
-  const { rows } = await client
-    .query(`SELECT NOT indisvalid AS invalid FROM pg_index WHERE indexrelid = to_regclass($1)`, [m[1]])
-    .catch(() => ({ rows: [] as Array<{ invalid: boolean }> }));
-  if (rows[0]?.invalid) await client.query(`DROP INDEX CONCURRENTLY IF EXISTS ${m[1]}`).catch(() => {});
+async function dropInvalidIndex(client: pg.PoolClient, build: { name?: string; table: string }, before: string[]) {
+  const left = build.name ? [build.name] : (await invalidIndexes(client, build.table)).filter((name) => !before.includes(name));
+  for (const name of left) {
+    const { rows } = await client
+      .query(`SELECT NOT indisvalid AS invalid FROM pg_index WHERE indexrelid = to_regclass($1)`, [name])
+      .catch(() => ({ rows: [] as Array<{ invalid: boolean }> }));
+    if (rows[0]?.invalid) await client.query(`DROP INDEX CONCURRENTLY IF EXISTS ${name}`).catch(() => {});
+  }
 }
 
 export interface BackfillOptions {
@@ -124,8 +145,10 @@ export interface BackfillOptions {
  */
 export async function backfill(pool: pg.Pool, o: BackfillOptions): Promise<{ updated: number; batches: number; lastId: string | null }> {
   const id = o.idColumn ?? 'id';
-  const batchSize = o.batchSize ?? 1000;
-  const retries = o.retries ?? 5;
+  // batchSize 0 "finished" at once with nothing done; NaN retries retried a deadlocked batch forever.
+  const batchSize = ms(o.batchSize ?? 1000, 'batchSize', 1);
+  const retries = ms(o.retries ?? 5, 'retries');
+  const pauseMs = ms(o.pauseMs ?? 50, 'pauseMs');
   let lastId = o.afterId == null ? null : String(o.afterId);
   let updated = 0;
   let batches = 0;
@@ -162,6 +185,6 @@ export async function backfill(pool: pg.Pool, o: BackfillOptions): Promise<{ upd
     batches++;
     callHook(o.onBatch, updated, lastId); // a progress logger that fails must not stop the backfill halfway
     if (rows.length < batchSize) return { updated, batches, lastId };
-    await sleep(o.pauseMs ?? 50, undefined, { signal: o.signal }).catch(() => {}); // an abort ends the pause at once
+    await sleep(pauseMs, undefined, { signal: o.signal }).catch(() => {}); // an abort ends the pause at once
   }
 }

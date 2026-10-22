@@ -32,12 +32,17 @@ against traffic.
      `NOT VALID`; `UNIQUE` without `USING INDEX`; `VACUUM FULL`, `CLUSTER` or a non-concurrent `REINDEX`;
      `CONCURRENTLY` inside a transaction.
    - **Warnings** (need a human OK): type changes, `SET NOT NULL`, renames and drops, unbatched `UPDATE`/`DELETE`,
-     `LOCK TABLE`.
+     `LOCK TABLE`, `TRUNCATE`.
    - Statements on a table created in the same migration are exempt.
+   - A quoted identifier is one name even when it holds a `;` (`"orders;archive"`). Splitting there hid the
+     statement after it from every rule.
 2. **Run DDL with `runStep`** from [references/migrate.ts](references/migrate.ts).
    - Each statement gets a `lock_timeout`, and on `55P03` it is retried with jittered backoff.
    - `CREATE` / `DROP` / `REINDEX … CONCURRENTLY` runs outside a transaction. If it fails, the INVALID index it left
-     behind is dropped, so a retry can't trip over the name and writes don't keep maintaining a useless index.
+     behind is dropped, so a retry can't trip over the name and writes don't keep maintaining a useless index. An
+     unnamed `CREATE INDEX CONCURRENTLY ON t (c)` gets a generated name; its INVALID index is the one that wasn't on
+     the table before the attempt. Missed, each retry left another (`t_c_idx`, `t_c_idx1`, …).
+   - `attempts` and `baseDelayMs` must be integers, checked before anything runs: NaN attempts retried forever.
    - With another migration tool, set `lock_timeout` at the top of each migration and retry the deploy step.
 3. **Follow the recipes** in [references/patterns.md](references/patterns.md) for: NOT NULL in three steps, rename
    or type change via a new column, foreign keys and unique constraints, dropping columns, retrofitting tenant
@@ -48,6 +53,8 @@ against traffic.
    If it still gives up, the error carries `lastId`: resume with `afterId: err.lastId`.
    Pass `signal` (a job's `ctx.signal`, or one aborted on SIGTERM): the backfill stops after the current batch, and
    the error carries `lastId` the same way. `onBatch` reports progress only; it can't stop the backfill.
+   `batchSize` must be a positive integer and `retries` and `pauseMs` integers of 0 or more: `batchSize: 0`
+   "finished" at once with nothing done, and NaN retries retried a deadlocked batch forever.
    Copy `hooks.ts` and `pg-transaction.ts` along with `migrate.ts`: they are the kit's shared building blocks.
 5. **Check before shipping.**
    - Every new index has `pg_index.indisvalid = true`.

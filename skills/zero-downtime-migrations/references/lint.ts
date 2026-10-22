@@ -68,6 +68,9 @@ export function lintMigration(sql: string): Finding[] {
     if (/^DROP\s+TABLE\b/i.test(s)) {
       add('breaks-running-code', 'warning', s, 'The deployed code still uses this table. Stop using it in a release first.');
     }
+    if (/^TRUNCATE\b/i.test(s) && !isNew) {
+      add('truncate', 'warning', s, 'TRUNCATE takes an ACCESS EXCLUSIVE lock and empties the table under the running code. Make sure nothing reads it any more, or delete in batches.');
+    }
     if (/^(?:VACUUM\s+(?:\(.*FULL.*\)|FULL)|CLUSTER)\b/i.test(s) || (/^REINDEX\b/i.test(s) && !/\bCONCURRENTLY\b/i.test(s))) {
       add('table-rewrite', 'error', s, 'This holds an exclusive lock for the whole rewrite. Use REINDEX … CONCURRENTLY, or pg_repack for a table rewrite.');
     }
@@ -85,7 +88,8 @@ export function lintMigration(sql: string): Finding[] {
 function tableOf(s: string): string | null {
   const m =
     /^ALTER\s+TABLE\s+(?:IF\s+EXISTS\s+)?(?:ONLY\s+)?([\w."]+)/i.exec(s) ??
-    /^CREATE\s+(?:UNIQUE\s+)?INDEX\s+(?:CONCURRENTLY\s+)?(?:IF\s+NOT\s+EXISTS\s+)?(?:[\w."]+\s+)?ON\s+(?:ONLY\s+)?([\w."]+)/i.exec(s);
+    /^CREATE\s+(?:UNIQUE\s+)?INDEX\s+(?:CONCURRENTLY\s+)?(?:IF\s+NOT\s+EXISTS\s+)?(?:[\w."]+\s+)?ON\s+(?:ONLY\s+)?([\w."]+)/i.exec(s) ??
+    /^TRUNCATE\s+(?:TABLE\s+)?(?:ONLY\s+)?([\w."]+)/i.exec(s);
   return m ? norm(m[1]) : null;
 }
 
@@ -123,6 +127,14 @@ function splitStatements(sql: string): string[] {
       const escapes = /[Ee]/.test(sql[i - 1] ?? '') && !/[\w$]/.test(sql[i - 2] ?? '');
       let j = i + 1;
       while (j < sql.length && !(sql[j] === "'" && sql[j + 1] !== "'")) j += sql[j] === "'" || (escapes && sql[j] === '\\') ? 2 : 1;
+      cur += sql.slice(i, j + 1);
+      i = j + 1;
+      continue;
+    }
+    if (sql[i] === '"') {
+      // A quoted identifier may hold a semicolon or "--": "orders;archive" is one name. "" inside it is a quote.
+      let j = i + 1;
+      while (j < sql.length && !(sql[j] === '"' && sql[j + 1] !== '"')) j += sql[j] === '"' ? 2 : 1;
       cur += sql.slice(i, j + 1);
       i = j + 1;
       continue;

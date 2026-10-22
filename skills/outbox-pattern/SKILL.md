@@ -27,7 +27,7 @@ This is also how to keep slow AI work off the request path. The request writes `
 
 1. Migration: [references/outbox.sql](references/outbox.sql), which creates `outbox`, `processed_messages`, and an optional NOTIFY trigger.
 2. Producer: call `enqueue(tx, …)` from [references/outbox.ts](references/outbox.ts) with the **business transaction's client**. Put `traceparent` and the tenant id in `headers`, and add a schema version to the payload.
-3. Relay: run `createRelay({ pool, publish }).relayOnce()` in a loop (on NOTIFY, plus every 1–5 s as fallback). It takes `pg_try_advisory_xact_lock`, so only one relay instance is active, which is what keeps ordering. It stops at the first failed publish so later messages don't overtake.
+3. Relay: run `createRelay({ pool, publish }).run({ signal })` in the relay process. It relays batch after batch while there is a backlog and polls every `idleMs` (default 1 s) when there isn't; for lower latency, also call `relayOnce()` from a `LISTEN outbox` handler. Each batch takes `pg_try_advisory_xact_lock`, so only one relay instance is active, which is what keeps ordering. It stops at the first failed publish so later messages don't overtake. Copy `pg-transaction.ts`, `with-timeout.ts` and `worker-loop.ts` along with `outbox.ts`: they are the kit's shared building blocks.
    - `publishTimeoutMs` (default 10 s) fails a publish that never settles. Without it, one hung broker call keeps the relay's transaction and lock open forever: every instance skips, and the outbox stops with no error anywhere.
    - If the database connection dies mid-batch (failover, `idle_in_transaction_session_timeout`), the relay stops before the next publish. The marks can't commit any more, so every further publish would only be sent again on the next run.
    - Published messages are marked with one `UPDATE … WHERE id = ANY($1)` per batch, not one per message. That gives 8× the relay throughput at batch 100 (26,600 vs 3,200 messages/s against an instant broker) with the same crash behaviour, because the marks only become durable at `COMMIT` either way. With a real broker, publish latency dominates: use its async or batched publish API before raising `batchSize`.
@@ -43,6 +43,7 @@ This is also how to keep slow AI work off the request path. The request writes `
 - Publish succeeds but the relay "crashes" before marking → the broker receives a duplicate → the consumer reports `applied`, then `duplicate`, and the side effect happens once.
 - Consumer throws → the dedup mark rolls back → a retry applies.
 - Two relays at once → one backs off, nothing is published twice.
+- `run()` drains a backlog of 25 in batches of 10, then picks up a message written later, until stopped; each is published once.
 - A publish that never returns → `relayOnce` gives up after `publishTimeoutMs`, records the error on that message, and releases the lock, so the next run can proceed ([latent-bugs-round2.test.ts](../../verify/tests/latent-bugs-round2.test.ts)).
 - Postgres goes away (through Toxiproxy) right after the first of 3 publishes → `relayOnce` rejects without publishing the other two; after recovery all 3 go out, and only the first was sent twice ([resilience-testing.test.ts](../../verify/tests/resilience-testing.test.ts)). Before the fix, all 3 were sent twice.
 

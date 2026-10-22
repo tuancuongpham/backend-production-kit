@@ -6,6 +6,7 @@
 // Table names, SET clauses and conditions are migration code, written by developers. Never pass request data.
 import { setTimeout as sleep } from 'node:timers/promises';
 import type pg from 'pg';
+import { withClient, withTransaction } from './pg-transaction.ts';
 
 export interface Step {
   name: string;
@@ -30,9 +31,17 @@ export interface StepOptions {
 }
 
 const LOCK_NOT_AVAILABLE = '55P03';
+/** Errors after which the same statement can simply run again: deadlock, serialization failure, lock timeout. */
+const TRANSIENT = new Set(['40P01', '40001', LOCK_NOT_AVAILABLE]);
+const codeOf = (err: unknown) => (err as { code?: string }).code;
 const ms = (n: number, name: string) => {
   if (!Number.isInteger(n) || n < 0) throw new Error(`${name} must be a non-negative integer`);
   return n;
+};
+/** Doubling from `base` up to 30 s, with jitter. */
+const backoff = (attempt: number, base: number) => {
+  const delay = Math.min(30_000, base * 2 ** (attempt - 1));
+  return delay / 2 + Math.random() * (delay / 2);
 };
 
 /** Runs one migration step; resolves with the number of attempts it took. */
@@ -41,39 +50,29 @@ export async function runStep(pool: pg.Pool, step: Step, o: StepOptions = {}): P
   const statementTimeout = ms(o.statementTimeoutMs ?? 0, 'statementTimeoutMs');
   const attempts = o.attempts ?? 10;
   const concurrently = step.concurrently ?? /\bCONCURRENTLY\b/i.test(step.sql);
+  const run = concurrently
+    ? // Can't run in a transaction: session settings instead, reset afterwards since the connection goes back to a pool.
+      () =>
+        withClient(pool, async (client) => {
+          await client.query(`SET lock_timeout = ${lockTimeout}; SET statement_timeout = ${statementTimeout}`);
+          try {
+            await client.query(step.sql);
+          } catch (err) {
+            await dropInvalidIndex(client, step.sql);
+            throw err;
+          } finally {
+            await client.query('RESET lock_timeout; RESET statement_timeout').catch(() => {});
+          }
+        })
+    : () => withTransaction(pool, (tx) => tx.query(step.sql), { begin: `BEGIN; SET LOCAL lock_timeout = ${lockTimeout}; SET LOCAL statement_timeout = ${statementTimeout}` });
   for (let attempt = 1; ; attempt++) {
-    const client = await pool.connect();
-    // A connection dying between statements must fail this step, not crash the process.
-    let lost: Error | undefined;
-    const onLost = (err: Error) => {
-      lost = err;
-    };
-    client.on('error', onLost);
     try {
-      if (concurrently) {
-        // Session settings, reset afterwards: the connection goes back to a pool.
-        await client.query(`SET lock_timeout = ${lockTimeout}; SET statement_timeout = ${statementTimeout}`);
-        try {
-          await client.query(step.sql);
-        } finally {
-          await client.query('RESET lock_timeout; RESET statement_timeout').catch(() => {});
-        }
-      } else {
-        await client.query(`BEGIN; SET LOCAL lock_timeout = ${lockTimeout}; SET LOCAL statement_timeout = ${statementTimeout}`);
-        await client.query(step.sql);
-        await client.query('COMMIT');
-      }
+      await run();
       return { attempts: attempt };
     } catch (err) {
-      if (concurrently) await dropInvalidIndex(client, step.sql);
-      else await client.query('ROLLBACK').catch(() => {});
-      if ((err as { code?: string }).code !== LOCK_NOT_AVAILABLE || attempt >= attempts) throw err;
+      if (codeOf(err) !== LOCK_NOT_AVAILABLE || attempt >= attempts) throw err;
       o.onRetry?.(step, attempt, err);
-      const delay = Math.min(30_000, (o.baseDelayMs ?? 1000) * 2 ** (attempt - 1));
-      await sleep(delay / 2 + Math.random() * (delay / 2));
-    } finally {
-      client.off('error', onLost);
-      client.release(lost);
+      await sleep(backoff(attempt, o.baseDelayMs ?? 1000));
     }
   }
 }
@@ -105,29 +104,45 @@ export interface BackfillOptions {
   pauseMs?: number;
   /** Resume after this id (the lastId of an interrupted run). */
   afterId?: string | number | null;
+  /** Retries of a batch that hit a deadlock with the app, a serialization failure or a lock timeout (default 5). */
+  retries?: number;
   onBatch?: (done: number, lastId: string) => void;
 }
 
 /**
  * Update a large table in short batches walked by primary key. No transaction holds row locks for long, and
- * no single statement writes a gigabyte of WAL. Resumable: on interruption, start again from `lastId`.
+ * no single statement writes a gigabyte of WAL. A batch that loses a deadlock against the app (they update the
+ * same rows in another order) is retried, not the whole backfill. Resumable: if it still gives up, the error
+ * carries `lastId`; start again with `afterId: err.lastId`.
  */
 export async function backfill(pool: pg.Pool, o: BackfillOptions): Promise<{ updated: number; batches: number; lastId: string | null }> {
   const id = o.idColumn ?? 'id';
   const batchSize = o.batchSize ?? 1000;
+  const retries = o.retries ?? 5;
   let lastId = o.afterId == null ? null : String(o.afterId);
   let updated = 0;
   let batches = 0;
+  const batch = async () => {
+    for (let attempt = 1; ; attempt++) {
+      try {
+        return await pool.query(
+          `WITH batch AS (
+             SELECT ${id} FROM ${o.table}
+             WHERE ($1::bigint IS NULL OR ${id} > $1) ${o.where ? `AND (${o.where})` : ''}
+             ORDER BY ${id} LIMIT $2)
+           UPDATE ${o.table} t SET ${o.set} FROM batch WHERE t.${id} = batch.${id}
+           RETURNING t.${id} AS id`,
+          [lastId, batchSize],
+        );
+      } catch (err) {
+        // One statement per batch: a failed batch changed nothing, so running it again is safe.
+        if (!TRANSIENT.has(codeOf(err) ?? '') || attempt > retries) throw Object.assign(err as Error, { lastId });
+        await sleep(backoff(attempt, 100));
+      }
+    }
+  };
   for (;;) {
-    const { rows } = await pool.query(
-      `WITH batch AS (
-         SELECT ${id} FROM ${o.table}
-         WHERE ($1::bigint IS NULL OR ${id} > $1) ${o.where ? `AND (${o.where})` : ''}
-         ORDER BY ${id} LIMIT $2)
-       UPDATE ${o.table} t SET ${o.set} FROM batch WHERE t.${id} = batch.${id}
-       RETURNING t.${id} AS id`,
-      [lastId, batchSize],
-    );
+    const { rows } = await batch();
     if (rows.length === 0) return { updated, batches, lastId };
     lastId = String(rows.reduce((max, r) => (BigInt(r.id) > BigInt(max) ? r.id : max), rows[0].id));
     updated += rows.length;

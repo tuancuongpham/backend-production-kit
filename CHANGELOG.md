@@ -1,5 +1,102 @@
 # Changelog
 
+## Unreleased
+
+### Fixed — latent bugs, round 3
+Every reference file was read again, and each suspected failure was written down as a hypothesis and as a test of
+the behaviour the skill promises. All 34 tests failed on 0.4.0 and pass now
+(`verify/tests/latent-bugs-round3.test.ts`). One more hypothesis was refuted: an any-word tsquery built with
+`quote_literal` can't break on user input, because Postgres's `simple` parser never yields a lexeme with a
+backslash or a quote.
+- `webhook-ingestion`: a handler slower than `stuckAfterSec` was claimed again and run alongside the first, and both
+  credited the payment. A worker that had lost its event could also put it back to `pending` after another worker
+  finished it. Each claim now carries a `lease_id`, and the handler's transaction locks its own row as the lease
+  holder: `SKIP LOCKED` then passes over it, and a worker that lost its row gets `lost`.
+- `llm-gateway`:
+  - a cache or budget-store error after the model answered was treated as a provider failure: the fallback was
+    called (a second paid answer), the healthy provider's breaker counted a failure, and the reservation stayed.
+    After the answer, settling and caching are now best effort, reported through the new `onError`.
+  - A cache store that was down failed every request; it is now skipped.
+  - When a breaker's cooldown ended, every waiting request called the dead provider (10 calls instead of 1 probe).
+  - A request already cancelled was still sent.
+  - Fallback answers were cached for 24 h; now 5 minutes (`fallbackCacheTtlSec`).
+- `llm-tool-safety`:
+  - the "untrusted content" taint lived in process memory, so the agent's next turn (a new request, maybe another
+    instance) ran writes without approval. It is now stored per conversation (`tool_sessions`, a `TaintStore` port).
+  - A retried approved call was refused as "approval already used" instead of replaying its result.
+  - `decide()` accepted an approver from another tenant; it now takes `{ tenantId, userId }`.
+  - A tool call left `running` by a crash blocked its id forever; it is taken over after `staleRunSec`.
+- `idempotency-keys`: a request whose stale claim had been taken over could delete the new owner's claim when it
+  failed, so a third retry ran the charge again. Claims carry a `claim_token` now.
+- `job-queue`: in a batch, only the running job was heartbeated. The jobs waiting behind it expired, were rescued,
+  and could go dead without ever running. Stopping a worker also ran out the whole batch; it now hands unstarted
+  jobs back without spending their attempt.
+- `data-retention-and-erasure`:
+  - two instances processing the same request could reopen it after it was completed and its subject id cleared,
+    and it was then retried forever with `erase(null)`. Requests are now leased.
+  - `processPending` miscounted completions when more than one batch was open.
+  - An `anonymize` entry that left a personal column in place was accepted; the inventory is now checked at startup.
+- `agent-safe-db`: the executor's own pool had no `error` listener (an idle connection ended by the server crashed
+  the process), no connect timeout (a black-holed database hung every call) and no client-side query timeout.
+- `rate-limiting`: the breaker had no half-open state (20 checks probed a dead Redis instead of 1); `check()` now
+  refuses a cost outside (0, capacity], since a negative cost added tokens.
+- `cache-stampede`: a hit returned a different shape than the miss that filled it (a `Date` came back as a string);
+  a value JSON can't encode failed the request; a black-holed Redis cost 50 ms on every request. Values now go
+  through a `Codec` on every path, unencodable values are served uncached, and Redis calls have a breaker.
+- `sse-streaming`: event ids restarted at 1 with the process, so a client reconnecting after a deploy silently
+  missed the new process's first events. Ids now start from the clock and an old id gets `reset`.
+- `multitenant-postgres`: the RLS audit accepted a `USING (true)` policy; a third query flags permissive policies
+  that don't filter by tenant.
+- `rag-evals`: a retriever returning the same id twice scored recall 2; a golden set with new hard questions failed
+  the gate (runs are now compared on shared queries, and added or removed ones are listed); `fillPrompt` mangled
+  answers containing `$&` or `$'`.
+- `llm-observability`: a reply with `content: null` (a tool call) made the redactor throw and turned a successful
+  call into an error; recording can't throw any more. `otel-setup.ts` registered a SIGTERM listener that only
+  flushed, which kept a service without its own handler running until SIGKILL; it exports `shutdownTelemetry`
+  instead.
+- `pii-redaction`: a custom detector without the `g` flag redacted only the first match, and a hint with it skipped
+  every other string. Both are refused at startup.
+- `zero-downtime-migrations`: a backfill batch that lost a deadlock failed the whole backfill; it is retried, and a
+  final error carries `lastId`. The linter now flags `ADD COLUMN … NOT NULL` without a default.
+- Found while refactoring: `adr-writer`'s `new-adr.mjs` filled its template with `replaceAll`, so a title with `$&`
+  came out garbled.
+
+### Changed — architecture
+- Stateful components are classes behind the same `createX()` factories: `OutboxRelay`, `InboxWorker`, `JobWorker`,
+  `Scheduler`, `IdempotencyKeys`, `LlmGateway`, `ToolGuard`/`ToolSession`, `DataLifecycle`, `AgentDb`,
+  `RateLimiter`, `ReadThroughCache`, `SseStream`, `ReplayBuffer`, `Toxiproxy`. Pure logic stays functions, and the
+  redactor and the hardened server stay closures, because their functions are passed around detached.
+- A shared kernel in `shared/` (`withClient`/`withTransaction`, `CircuitBreaker`, `withTimeout`, `runLoops`),
+  vendored into each skill that imports it. `npm run sync:shared` copies it, and `npm run validate` fails on a copy
+  that drifts.
+- `docs/architecture.md`: when to use a class, a function or a closure; the ports; the nine invariants.
+- New: `OutboxRelay#run()`, the relay loop the other workers already had.
+- To upgrade from 0.4.0:
+  - run the SQL files again: they add `webhook_inbox.lease_id`, `idempotency_keys.claim_token`,
+    `tool_results.claim_token`, the `tool_sessions` table, and `erasure_requests.lease_id`/`locked_until`;
+  - `ToolGuard#decide` takes `{ tenantId, userId }`, and `ToolSession#markUntrusted` returns a promise;
+  - `pgUsageSink` rejects on a failed write (the gateway hands it to `onUsageError`);
+  - cache entries have a new format: old ones read as misses and are overwritten. Bump the prefix version to drop
+    them at once.
+
+### Tooling
+- `npm run typecheck`: strict TypeScript over the reference code and the shared kernel, with `erasableSyntaxOnly`,
+  which rejects what Node's type stripping can't run (enums, namespaces, parameter properties). Node never checks
+  types, so before this a type error in reference code went unnoticed. It now runs in CI and in the release job.
+  The code passed it as is.
+- `npm run sync:shared`, and `npm run validate` checks that every vendored copy of the shared kernel is identical.
+
+### Performance
+- The semantic cache lookup in shadow mode runs beside the model call: 108 ms per request instead of 206 ms
+  (100 ms embedding, 100 ms model).
+- 20 requests through the cache with Redis black-holed: 181 ms instead of 1,236 ms.
+- Re-measured inside the Docker network after the refactor: the outbox relay, rate limiter, webhook claim and
+  drain, job claim and idempotency stayed within run-to-run noise of 0.4.0. The webhook worker makes one more round
+  trip per event (locking its row): about 3% on a drain with 5 ms handlers.
+- One regression was caught by those measurements and fixed before release. Idempotency replays went from 0.84 ms
+  to 1.75 ms, because the refactored early return committed instead of rolling back. `ON CONFLICT DO UPDATE` locks
+  the existing row even when it changes nothing, so the commit cost a WAL flush. It rolls back again (0.82 ms).
+
 ## 0.4.0 — 2026-10-22
 
 ### New skill: `job-queue`

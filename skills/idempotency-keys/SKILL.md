@@ -59,7 +59,14 @@ POST /orders   Idempotency-Key: 7f0c2a8e-…
      - If the process dies mid-call, the claim stays in progress. After `staleAfterSec` a retry of the *same*
        request takes it over and runs the handler again, and the downstream key turns that into a no-op at the
        provider.
+     - Every claim carries a new `claim_token`: only its holder may store the response or release the key. A
+       request whose claim was taken over can't release the new owner's claim when it finally fails, which would
+       let a third retry run alongside the second.
      - Pass `signal` to the external call, so it can't outlive the claim.
+   - To configure once (`ttlSec`, `staleAfterSec`), create `new IdempotencyKeys({ pool, ttlSec })` and call its
+     `run`, `runExternal` and `prune`; the functions above are one-call forms of the same.
+   - Copy `pg-transaction.ts` along with `idempotency.ts`: it is the kit's shared transaction helper, identical in
+     every skill that has it.
    - Handlers **return** definitive outcomes, which are stored and replayed, and **throw** on transient failures,
      which store nothing.
 4. **HTTP mapping.**
@@ -108,7 +115,9 @@ Against real Postgres. [verify/tests/idempotency-keys.test.ts](../../verify/test
   - a duplicate mid-call gets 409, and the retry replays without calling the provider;
   - **a process that died after charging is recovered after `staleAfterSec` with no second charge**, and a different
     request can't take its claim over;
-  - a failed call releases the key, and the retry sends the same downstream key.
+  - a failed call releases the key, and the retry sends the same downstream key;
+  - a request whose stale claim was taken over fails later → the new owner's claim stays, and a third retry gets
+    409 instead of charging again ([latent-bugs-round3.test.ts](../../verify/tests/latent-bugs-round3.test.ts)).
 - Keys are parsed strictly and fingerprints are canonical.
 
 How to write these tests so they prove something:
@@ -138,3 +147,5 @@ effects are external and how each external call is made idempotent downstream.
 - Fingerprinting raw body bytes: a client that re-serializes JSON on retry gets a spurious 422.
 - Storing 5xx or timeout responses: the client can never complete that operation with its key.
 - Expiring keys sooner than clients retry.
+- Releasing or completing a claim by key alone. After a takeover, the old owner deletes or overwrites the new
+  owner's claim; only the holder of the current claim token may.

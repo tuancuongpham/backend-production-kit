@@ -65,6 +65,9 @@ jobs:
       - name: Validate skills
         run: node scripts/validate-skills.mjs
 
+      - name: Type-check the reference code
+        run: npm run typecheck
+
       - name: Verification tests
         run: npm test
 

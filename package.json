@@ -13,6 +13,8 @@
     "test": "node --test --test-concurrency=1 \"verify/tests/*.test.ts\"",
     "test:unit": "node --test verify/tests/pii-redaction.test.ts verify/tests/llm-gateway.test.ts verify/tests/service-hardening.test.ts verify/tests/sse-streaming.test.ts verify/tests/llm-observability.test.ts verify/tests/adr-writer.test.ts",
     "validate": "node scripts/validate-skills.mjs",
+    "typecheck": "tsc -p tsconfig.json",
+    "sync:shared": "node scripts/sync-shared.mjs",
     "bench": "node bench/run.ts",
     "bench:docker": "node scripts/bench-docker.mjs"
   },
@@ -23,5 +25,10 @@
     "@opentelemetry/sdk-trace-base": "^2.0.1",
     "ioredis": "^5.6.1",
     "pg": "^8.16.0"
+  },
+  "devDependencies": {
+    "@types/node": "^24.19.2",
+    "@types/pg": "^8.23.1",
+    "typescript": "^5.9.3"
   }
 }

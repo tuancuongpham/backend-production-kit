@@ -13,22 +13,34 @@ export interface GoldenQuery {
 
 export type Retriever = (q: GoldenQuery) => Promise<string[]>;
 
-export const recallAtK = (retrieved: string[], relevant: string[], k: number) =>
-  relevant.length === 0 ? 1 : retrieved.slice(0, k).filter((id) => relevant.includes(id)).length / relevant.length;
+/**
+ * The first occurrence of each id, in order. Retrievers return duplicates whenever relevance is judged at a
+ * coarser level than retrieval (chunks mapped to their documents): counting them twice pushes recall above 1.
+ */
+const unique = (ids: string[]) => [...new Set(ids)];
 
-export const precisionAtK = (retrieved: string[], relevant: string[], k: number) =>
-  retrieved.slice(0, k).filter((id) => relevant.includes(id)).length / k;
+export const recallAtK = (retrieved: string[], relevant: string[], k: number) => {
+  const want = new Set(relevant);
+  return want.size === 0 ? 1 : unique(retrieved).slice(0, k).filter((id) => want.has(id)).length / want.size;
+};
+
+export const precisionAtK = (retrieved: string[], relevant: string[], k: number) => {
+  const want = new Set(relevant);
+  return unique(retrieved).slice(0, k).filter((id) => want.has(id)).length / k;
+};
 
 /** 1 / rank of the first relevant result; 0 when none was retrieved. */
 export const reciprocalRank = (retrieved: string[], relevant: string[]) => {
-  const i = retrieved.findIndex((id) => relevant.includes(id));
+  const want = new Set(relevant);
+  const i = unique(retrieved).findIndex((id) => want.has(id));
   return i < 0 ? 0 : 1 / (i + 1);
 };
 
 /** nDCG@k with binary relevance: rewards putting the relevant results first. */
 export const ndcgAtK = (retrieved: string[], relevant: string[], k: number) => {
-  const dcg = retrieved.slice(0, k).reduce((s, id, i) => s + (relevant.includes(id) ? 1 / Math.log2(i + 2) : 0), 0);
-  const ideal = Array.from({ length: Math.min(k, relevant.length) }, (_, i) => 1 / Math.log2(i + 2)).reduce((a, b) => a + b, 0);
+  const want = new Set(relevant);
+  const dcg = unique(retrieved).slice(0, k).reduce((s, id, i) => s + (want.has(id) ? 1 / Math.log2(i + 2) : 0), 0);
+  const ideal = Array.from({ length: Math.min(k, want.size) }, (_, i) => 1 / Math.log2(i + 2)).reduce((a, b) => a + b, 0);
   return ideal === 0 ? 1 : dcg / ideal;
 };
 
@@ -62,7 +74,7 @@ export async function evaluateRetriever(golden: GoldenQuery[], retrieve: Retriev
   const perQuery: QueryResult[] = [];
   let precision = 0;
   for (const q of golden) {
-    const retrieved = (await retrieve(q)).slice(0, k);
+    const retrieved = unique(await retrieve(q)).slice(0, k);
     precision += precisionAtK(retrieved, q.relevant, k);
     perQuery.push({
       id: q.id,
@@ -102,24 +114,38 @@ export interface Gate {
   maxSliceDrop?: number;
 }
 
-/** Compare a candidate run with the baseline (main branch). `pass: false` fails the CI job. */
+/**
+ * Compare a candidate run with the baseline (main branch). `pass: false` fails the CI job.
+ * Both runs are compared on the queries they share: a pull request that adds hard questions to the golden set
+ * lowers the candidate's average without anything getting worse, and must not fail the gate for it. Added and
+ * removed queries are listed instead.
+ */
 export function compareReports(baseline: Report, candidate: Report, gate: Gate = {}) {
+  const before = new Map(baseline.perQuery.map((r) => [r.id, r]));
+  const after = new Map(candidate.perQuery.map((r) => [r.id, r]));
+  const shared = candidate.perQuery.filter((r) => before.has(r.id)).map((r) => r.id);
+  const added = candidate.perQuery.filter((r) => !before.has(r.id)).map((r) => r.id);
+  const removed = baseline.perQuery.filter((r) => !after.has(r.id)).map((r) => r.id);
+  const avg = (runs: Map<string, QueryResult>, ids: string[], metric: (r: QueryResult) => number) => mean(ids.map((id) => metric(runs.get(id)!)));
+  const delta = (ids: string[], metric: (r: QueryResult) => number) => round(avg(after, ids, metric) - avg(before, ids, metric));
   const deltas = {
-    recall: round(candidate.recall - baseline.recall),
-    mrr: round(candidate.mrr - baseline.mrr),
-    ndcg: round(candidate.ndcg - baseline.ndcg),
+    recall: delta(shared, (r) => r.recall),
+    mrr: delta(shared, (r) => r.reciprocalRank),
+    ndcg: delta(shared, (r) => r.ndcg),
   };
-  const slices = Object.entries(baseline.byTag).map(([tag, b]) => ({ tag, delta: round((candidate.byTag[tag]?.recall ?? 0) - b.recall) }));
+  const tags = [...new Set(shared.flatMap((id) => before.get(id)!.tags))];
+  const slices = tags.map((tag) => ({ tag, delta: delta(shared.filter((id) => before.get(id)!.tags.includes(tag)), (r) => r.recall) }));
   const failures = [
+    ...(shared.length === 0 ? ['the two runs share no queries: nothing to compare'] : []),
     ...(deltas.recall < -(gate.maxRecallDrop ?? 0.02) ? [`recall@${candidate.k} fell by ${-deltas.recall}`] : []),
     ...(deltas.mrr < -(gate.maxMrrDrop ?? 0.02) ? [`MRR fell by ${-deltas.mrr}`] : []),
     ...slices.filter((s) => s.delta < -(gate.maxSliceDrop ?? 0.05)).map((s) => `recall in "${s.tag}" fell by ${-s.delta}`),
   ];
-  const before = new Map(baseline.perQuery.map((r) => [r.id, r]));
-  const regressed = candidate.perQuery
-    .filter((r) => r.recall < (before.get(r.id)?.recall ?? 0))
-    .map((r) => ({ id: r.id, query: r.query, was: before.get(r.id)!.recall, now: r.recall, missed: r.missed }));
-  return { pass: failures.length === 0, failures, deltas, regressed };
+  const regressed = shared
+    .map((id) => ({ was: before.get(id)!, now: after.get(id)! }))
+    .filter(({ was, now }) => now.recall < was.recall)
+    .map(({ was, now }) => ({ id: now.id, query: now.query, was: was.recall, now: now.recall, missed: now.missed }));
+  return { pass: failures.length === 0, failures, deltas, regressed, added, removed };
 }
 
 /** A short markdown summary for the pull request. */
@@ -132,6 +158,9 @@ export function toMarkdown(baseline: Report, candidate: Report, comparison: Retu
     '|---|---|---|---|---|',
     row('baseline', baseline),
     row('this change', candidate),
+    ...(comparison.added.length || comparison.removed.length
+      ? ['', `Golden set changed: ${comparison.added.length} queries added, ${comparison.removed.length} removed (compared on the ${candidate.queries - comparison.added.length} shared).`]
+      : []),
     ...(comparison.failures.length ? ['', ...comparison.failures.map((f) => `- ${f}`)] : []),
     ...(comparison.regressed.length
       ? ['', 'Queries that lost relevant results:', ...comparison.regressed.slice(0, 10).map((r) => `- \`${r.query}\`: recall ${r.was} → ${r.now}`)]

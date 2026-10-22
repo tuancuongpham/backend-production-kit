@@ -34,11 +34,13 @@ export const ATTR = {
   retrievalQuery: 'app.retrieval.query',
   retrievalDocs: 'app.retrieval.documents',
   retrievalCount: 'app.retrieval.count',
+  captureError: 'app.trace.capture_error',
 } as const;
 
 export interface TraceMessage {
   role: string;
-  content: string;
+  /** Text, or SDK content parts (serialized before redaction, so the redactor sees their text too). */
+  content: string | unknown[] | null;
 }
 
 export interface LlmCallInfo {
@@ -57,7 +59,8 @@ export interface LlmCallInfo {
 }
 
 export interface LlmCallResult {
-  content: string;
+  /** null when the model answered with tool calls only. */
+  content: string | null;
   usage?: { inputTokens: number; outputTokens: number };
   responseModel?: string;
   finishReason?: string;
@@ -85,7 +88,24 @@ function bounded(s: string, max: number) {
 }
 
 function contentJson(messages: TraceMessage[], redact: ((s: string) => string) | undefined, max: number) {
-  return bounded(JSON.stringify(messages.map((m) => ({ role: m.role, content: redact ? redact(m.content) : m.content }))), max);
+  const render = (content: TraceMessage['content']) => {
+    if (content === null || content === undefined) return null;
+    const text = typeof content === 'string' ? content : JSON.stringify(content);
+    return redact ? redact(text) : text;
+  };
+  return bounded(JSON.stringify(messages.map((m) => ({ role: m.role, content: render(m.content) }))), max);
+}
+
+/**
+ * Instrumentation must never fail the call it observes. If recording throws (a custom redactor, an odd result
+ * from an SDK), the span loses that piece and says why; the model call and its answer are untouched.
+ */
+function safely(span: Span, what: string, record: () => void) {
+  try {
+    record();
+  } catch (err) {
+    span.setAttribute(ATTR.captureError, `${what}: ${err instanceof Error ? err.message : String(err)}`);
+  }
 }
 
 /** Wrap one model call. Creates a CLIENT span as a child of whatever is active (HTTP request, job). */
@@ -113,25 +133,29 @@ export async function withLlmSpan<T extends LlmCallResult>(
       ...(info.promptVersion && { [ATTR.promptVersion]: info.promptVersion }),
     });
     if (capture) {
-      const input = contentJson(info.messages, opts.redact, max);
-      span.setAttribute(ATTR.inputMessages, input);
-      span.setAttribute(ATTR.lfInput, input);
+      safely(span, 'input', () => {
+        const input = contentJson(info.messages, opts.redact, max);
+        span.setAttribute(ATTR.inputMessages, input);
+        span.setAttribute(ATTR.lfInput, input);
+      });
     }
     try {
       const result = await fn(span);
-      if (result.usage) {
-        span.setAttribute(ATTR.inputTokens, result.usage.inputTokens);
-        span.setAttribute(ATTR.outputTokens, result.usage.outputTokens);
-      }
-      if (result.responseModel) span.setAttribute(ATTR.responseModel, result.responseModel);
-      if (result.finishReason) span.setAttribute(ATTR.finishReasons, [result.finishReason]);
-      if (result.costUsd !== undefined) span.setAttribute(ATTR.costUsd, result.costUsd);
-      if (result.cache) span.setAttribute(ATTR.cache, result.cache);
-      if (capture) {
-        const output = contentJson([{ role: 'assistant', content: result.content }], opts.redact, max);
-        span.setAttribute(ATTR.outputMessages, output);
-        span.setAttribute(ATTR.lfOutput, output);
-      }
+      safely(span, 'output', () => {
+        if (result.usage) {
+          span.setAttribute(ATTR.inputTokens, result.usage.inputTokens);
+          span.setAttribute(ATTR.outputTokens, result.usage.outputTokens);
+        }
+        if (result.responseModel) span.setAttribute(ATTR.responseModel, result.responseModel);
+        if (result.finishReason) span.setAttribute(ATTR.finishReasons, [result.finishReason]);
+        if (result.costUsd !== undefined) span.setAttribute(ATTR.costUsd, result.costUsd);
+        if (result.cache) span.setAttribute(ATTR.cache, result.cache);
+        if (capture) {
+          const output = contentJson([{ role: 'assistant', content: result.content }], opts.redact, max);
+          span.setAttribute(ATTR.outputMessages, output);
+          span.setAttribute(ATTR.lfOutput, output);
+        }
+      });
       return result;
     } catch (err) {
       span.recordException(err as Error);
@@ -161,14 +185,16 @@ export async function withRetrievalSpan<T extends RetrievedDoc[]>(
 ): Promise<T> {
   const max = opts.maxContentChars ?? DEFAULT_MAX_CONTENT;
   return tracer.startActiveSpan('retrieve', async (span) => {
-    span.setAttribute(ATTR.retrievalQuery, bounded(opts.redact ? opts.redact(query) : query, max));
+    safely(span, 'query', () => span.setAttribute(ATTR.retrievalQuery, bounded(opts.redact ? opts.redact(query) : query, max)));
     try {
       const docs = await fn();
-      span.setAttribute(ATTR.retrievalCount, docs.length);
-      span.setAttribute(
-        ATTR.retrievalDocs,
-        bounded(JSON.stringify(docs.map((d) => ({ id: d.id, documentId: d.documentId, version: d.version, score: d.score, rank: d.rank }))), max),
-      );
+      safely(span, 'documents', () => {
+        span.setAttribute(ATTR.retrievalCount, docs.length);
+        span.setAttribute(
+          ATTR.retrievalDocs,
+          bounded(JSON.stringify(docs.map((d) => ({ id: d.id, documentId: d.documentId, version: d.version, score: d.score, rank: d.rank }))), max),
+        );
+      });
       return docs;
     } catch (err) {
       span.recordException(err as Error);

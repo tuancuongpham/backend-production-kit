@@ -114,4 +114,22 @@ describe('outbox-pattern', () => {
     assert.equal(new Set(sent).size, sent.length);
     assert.equal(sent.length, 20);
   });
+
+  it('run(): drains a backlog bigger than one batch, then follows new messages until stopped', async () => {
+    for (let i = 0; i < 25; i++) await placeOrder(`o${i}`);
+    const sent: string[] = [];
+    const ac = new AbortController();
+    const running = createRelay({ pool, publish: async (m) => void sent.push(m.id), batchSize: 10 }).run({ signal: ac.signal, idleMs: 20 });
+    const waitFor = async (n: number) => {
+      for (let t = Date.now(); sent.length < n && Date.now() - t < 2000; ) await new Promise((r) => setTimeout(r, 10));
+    };
+    await waitFor(25);
+    await placeOrder('late');
+    await waitFor(26);
+    ac.abort();
+    await running;
+    assert.equal(sent.length, 26);
+    assert.equal(new Set(sent).size, 26, 'each message once');
+    assert.equal((await pool.query('SELECT count(*)::int n FROM outbox WHERE published_at IS NULL')).rows[0].n, 0);
+  });
 });

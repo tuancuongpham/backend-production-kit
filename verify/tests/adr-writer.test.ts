@@ -7,12 +7,17 @@ import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { promisify } from 'node:util';
 // @ts-ignore — plain JS module
-import { slugify } from '../../skills/adr-writer/scripts/new-adr.mjs';
+import { fillTemplate, slugify } from '../../skills/adr-writer/scripts/new-adr.mjs';
 
 const run = promisify(execFile);
 const script = fileURLToPath(new URL('../../skills/adr-writer/scripts/new-adr.mjs', import.meta.url));
 
 describe('adr-writer', () => {
+  it('fills the template with the title exactly as typed', () => {
+    const title = "Giá theo bậc $& và $' — xem {{DATE}}";
+    assert.equal(fillTemplate('# ADR-{{NUMBER}}: {{TITLE}} ({{DATE}})', { NUMBER: '0007', TITLE: title, DATE: '2026-10-22' }), `# ADR-0007: ${title} (2026-10-22)`);
+  });
+
   it('slugifies Vietnamese titles', () => {
     assert.equal(slugify('Dùng RLS để cách ly dữ liệu đa khách hàng'), 'dung-rls-de-cach-ly-du-lieu-da-khach-hang');
     assert.equal(slugify('  Fail-open vs. fail-closed!  '), 'fail-open-vs-fail-closed');

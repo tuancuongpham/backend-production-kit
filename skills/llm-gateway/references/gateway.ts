@@ -1,8 +1,9 @@
-// Provider-agnostic LLM gateway core: budget check → exact cache → semantic cache →
-// provider chain with timeout + circuit breaker + fallback → cost accounting.
+// Provider-agnostic LLM gateway core: exact cache → semantic cache → budget reservation → provider chain with
+// timeout + circuit breaker + fallback → cost accounting.
 // Plug real providers in via the `Provider` interface (Anthropic/OpenAI SDKs, AI SDK,
 // or an upstream gateway such as LiteLLM / Vercel AI Gateway).
 import { createHash } from 'node:crypto';
+import { CircuitBreaker } from './circuit-breaker.ts';
 
 export interface ChatMessage {
   role: 'system' | 'user' | 'assistant';
@@ -107,8 +108,11 @@ export interface UsageRecord {
 /** USD per 1M tokens. Load from config — prices change; never hardcode them in business logic. */
 export type PriceTable = Record<string, { inputPer1M: number; outputPer1M: number }>;
 
+/** Where optional infrastructure failed. None of these fails a request. */
+export type GatewayStage = 'cache-read' | 'cache-write' | 'embed' | 'budget-settle' | 'usage';
+
 export interface GatewayOptions {
-  /** Primary first, then fallbacks (typically a cheaper/other-vendor model). */
+  /** Primary first, then fallbacks (typically a cheaper/other-vendor model). Names must be unique. */
   providers: Provider[];
   prices: PriceTable;
   cache?: CacheStore;
@@ -116,12 +120,18 @@ export interface GatewayOptions {
   embed?: (text: string) => Promise<number[]>;
   /**
    * 'shadow' (default): look up similar entries and report them via onShadowHit, but still call the
-   * model — collects labelled pairs to tune the threshold. 'serve' only after that eval passes.
+   * model — collects labelled pairs to tune the threshold. The lookup runs beside the model call, so it adds
+   * no latency. 'serve' only after that eval passes.
    */
   semanticMode?: 'off' | 'shadow' | 'serve';
   semanticThreshold?: number; // cosine similarity, default 0.95
   onShadowHit?: (h: ShadowHit) => void;
   cacheTtlSec?: number; // default 24h
+  /**
+   * TTL for answers that came from a fallback provider (default 300 s). They are what was available during an
+   * outage; with the full TTL they would keep being served for a day after the primary recovers. 0 = don't cache.
+   */
+  fallbackCacheTtlSec?: number;
   budget?: {
     store: BudgetStore;
     monthlyLimitUsd: (tenantId: string) => number | Promise<number>;
@@ -131,8 +141,15 @@ export interface GatewayOptions {
   /** Accounting must never fail the user's request: errors (sync or async) are swallowed and passed to onUsageError. */
   onUsage?: (u: UsageRecord) => void | Promise<unknown>;
   onUsageError?: (err: unknown) => void;
+  /**
+   * Failures of optional infrastructure: the cache store, embeddings, settling the budget after a call (the
+   * reservation then stays until you reconcile it from llm_usage), and the usage sink when onUsageError isn't set.
+   * Log and count them: the request goes on without that piece.
+   */
+  onError?: (err: unknown, stage: GatewayStage) => void;
   timeoutMs?: number; // per provider attempt, default 60s
-  breaker?: { threshold: number; cooldownMs: number }; // default 3 failures → 30s
+  /** Per provider: open after `threshold` failures in a row; after `cooldownMs`, one probe call decides. Default 3 → 30 s. */
+  breaker?: { threshold: number; cooldownMs: number };
   now?: () => number;
 }
 
@@ -141,6 +158,17 @@ export interface CallContext {
   userId?: string;
   feature?: string;
   signal?: AbortSignal;
+}
+
+export interface ChatResult extends CachedResponse {
+  cache: 'exact' | 'semantic' | 'miss' | 'bypass';
+  costUsd: number;
+  /** Providers skipped or failed before the one that answered. */
+  fallbackFrom: string[];
+  /** Tokens of the model call; absent on cache hits. */
+  usage?: Usage;
+  /** Semantic cache hits only. */
+  similarity?: number;
 }
 
 const sha256 = (s: string) => createHash('sha256').update(s).digest('hex');
@@ -159,49 +187,219 @@ export function defaultEstimateUsd(prices: PriceTable, models: string[], req: Ch
   return Math.max(0, ...models.map((m) => costUsd(prices, m, { inputTokens, outputTokens })));
 }
 
-export function createGateway(o: GatewayOptions) {
-  const now = o.now ?? Date.now;
-  const semanticMode = o.semanticMode ?? 'shadow';
-  const threshold = o.semanticThreshold ?? 0.95;
-  const ttl = o.cacheTtlSec ?? 86_400;
-  const breakerCfg = o.breaker ?? { threshold: 3, cooldownMs: 30_000 };
-  const breakers = new Map<string, { failures: number; openUntil: number }>();
+type Accounting = Omit<UsageRecord, 'tenantId' | 'userId' | 'feature' | 'latencyMs'>;
 
-  // A model without a price costs "$0": its estimate reserves nothing and its spend never counts,
-  // so the budget silently stops limiting. Refuse that configuration up front.
-  if (o.budget) {
-    const unpriced = o.providers.map((p) => p.model).filter((m) => !o.prices[m]);
-    if (unpriced.length) throw new Error(`llm-gateway: no price configured for model(s) ${unpriced.join(', ')}; budgets cannot be enforced`);
+interface SemanticLookup {
+  question: string;
+  embedding: number[] | null;
+  similar: { value: CachedResponse; similarity: number } | null;
+}
+
+/** A budget reservation for one call: settled once with the real cost, or released (settled at 0). */
+interface Reservation {
+  settle(actualUsd: number): Promise<void>;
+}
+
+export class LlmGateway {
+  readonly #providers: Provider[];
+  readonly #prices: PriceTable;
+  readonly #cache?: CacheStore;
+  readonly #embed?: (text: string) => Promise<number[]>;
+  readonly #semanticMode: 'off' | 'shadow' | 'serve';
+  readonly #threshold: number;
+  readonly #ttlSec: number;
+  readonly #fallbackTtlSec: number;
+  readonly #budget?: GatewayOptions['budget'];
+  readonly #onShadowHit?: (h: ShadowHit) => void;
+  readonly #onUsage?: GatewayOptions['onUsage'];
+  readonly #onUsageError?: (err: unknown) => void;
+  readonly #onError?: GatewayOptions['onError'];
+  readonly #timeoutMs: number;
+  readonly #now: () => number;
+  readonly #breakers: Map<string, CircuitBreaker>;
+
+  constructor(o: GatewayOptions) {
+    if (o.providers.length === 0) throw new Error('llm-gateway: at least one provider is required');
+    const names = o.providers.map((p) => p.name);
+    if (new Set(names).size !== names.length) throw new Error(`llm-gateway: provider names must be unique (each has its own circuit breaker): ${names.join(', ')}`);
+    // A model without a price costs "$0": its estimate reserves nothing and its spend never counts,
+    // so the budget silently stops limiting. Refuse that configuration up front.
+    if (o.budget) {
+      const unpriced = o.providers.map((p) => p.model).filter((m) => !o.prices[m]);
+      if (unpriced.length) throw new Error(`llm-gateway: no price configured for model(s) ${unpriced.join(', ')}; budgets cannot be enforced`);
+    }
+    this.#providers = o.providers;
+    this.#prices = o.prices;
+    this.#cache = o.cache;
+    this.#embed = o.embed;
+    this.#semanticMode = o.semanticMode ?? 'shadow';
+    this.#threshold = o.semanticThreshold ?? 0.95;
+    this.#ttlSec = o.cacheTtlSec ?? 86_400;
+    this.#fallbackTtlSec = o.fallbackCacheTtlSec ?? 300;
+    this.#budget = o.budget;
+    this.#onShadowHit = o.onShadowHit;
+    this.#onUsage = o.onUsage;
+    this.#onUsageError = o.onUsageError;
+    this.#onError = o.onError;
+    this.#timeoutMs = o.timeoutMs ?? 60_000;
+    this.#now = o.now ?? Date.now;
+    const breaker = o.breaker ?? { threshold: 3, cooldownMs: 30_000 };
+    this.#breakers = new Map(o.providers.map((p) => [p.name, new CircuitBreaker({ ...breaker, now: this.#now })]));
   }
 
-  const period = () => new Date(now()).toISOString().slice(0, 7); // 'YYYY-MM'
+  async chat(req: ChatRequest, ctx: CallContext): Promise<ChatResult> {
+    ctx.signal?.throwIfAborted(); // nobody is waiting for this answer: don't pay for it
+    const started = this.#now();
+    const record = (u: Accounting) => this.#record(ctx, started, u);
 
-  function cacheMode(req: ChatRequest): 'eligible' | 'bypass' {
-    // Only deterministic, tool-free requests are safe to serve from cache.
-    if (req.cache === false || (req.temperature ?? 0) > 0 || (req.tools?.length ?? 0) > 0) return 'bypass';
-    return 'eligible';
+    // 1. Caches first: a hit costs nothing, so it's served even to a tenant that's out of budget.
+    const cacheable = this.#cache !== undefined && this.#cacheable(req);
+    const scope = this.#scopeOf(ctx, req);
+    const exactKey = sha256(JSON.stringify([scope, req.messages, req.maxTokens ?? null]));
+    let semantic: Promise<SemanticLookup> | null = null;
+    if (cacheable) {
+      const hit = await this.#bestEffort('cache-read', () => this.#cache!.getExact(exactKey), null);
+      if (hit) {
+        record({ provider: hit.provider, model: hit.model, cache: 'exact', inputTokens: 0, outputTokens: 0, costUsd: 0, fallbackFrom: [], ok: true });
+        return { ...hit, cache: 'exact', costUsd: 0, fallbackFrom: [] };
+      }
+      const question = this.#semanticText(req);
+      if (question !== null && this.#embed && this.#semanticMode !== 'off') {
+        semantic = this.#semanticLookup(ctx, scope, question);
+        if (this.#semanticMode === 'serve') {
+          const { similar } = await semantic;
+          if (similar) {
+            record({ provider: similar.value.provider, model: similar.value.model, cache: 'semantic', inputTokens: 0, outputTokens: 0, costUsd: 0, fallbackFrom: [], ok: true });
+            return { ...similar.value, cache: 'semantic', similarity: similar.similarity, costUsd: 0, fallbackFrom: [] };
+          }
+        }
+        // Shadow mode: the lookup keeps running beside the model call and reports what it would have served.
+      }
+    }
+
+    // 2. Budget: atomically reserve a pessimistic estimate before spending; settle with the real cost.
+    const reservation = await this.#reserve(req, ctx, record);
+    try {
+      // 3. Provider chain.
+      const { provider, completion, fallbackFrom } = await this.#callChain(req, ctx, record);
+      // The answer exists and is paid for. Nothing below may fail the request or buy it again elsewhere.
+      const cost = costUsd(this.#prices, provider.model, completion.usage);
+      await reservation?.settle(cost);
+      const value: CachedResponse = { content: completion.content, model: provider.model, provider: provider.name };
+      if (cacheable) await this.#remember(scope, exactKey, value, semantic, fallbackFrom.length > 0);
+      const cache = cacheable ? 'miss' : 'bypass';
+      record({ provider: provider.name, model: provider.model, cache, ...completion.usage, costUsd: cost, fallbackFrom, ok: true });
+      return { ...value, cache, usage: completion.usage, costUsd: cost, fallbackFrom };
+    } finally {
+      await reservation?.settle(0); // no-op after a successful settle; releases the reservation on failure
+    }
+  }
+
+  /** Only deterministic, tool-free requests are safe to serve from cache. */
+  #cacheable(req: ChatRequest): boolean {
+    return req.cache !== false && (req.temperature ?? 0) <= 0 && (req.tools?.length ?? 0) === 0;
   }
 
   /** Scope = tenant + model route + system prompt: a cached answer never crosses those lines. */
-  function scopeOf(ctx: CallContext, req: ChatRequest) {
+  #scopeOf(ctx: CallContext, req: ChatRequest): string {
     const system = req.messages.filter((m) => m.role === 'system').map((m) => m.content).join('\n');
-    return sha256(JSON.stringify([ctx.tenantId, o.providers.map((p) => p.model), system]));
+    return sha256(JSON.stringify([ctx.tenantId, this.#providers.map((p) => p.model), system]));
   }
 
   /** Semantic matching only for single-question requests; in multi-turn chats the history changes the meaning. */
-  function semanticText(req: ChatRequest): string | null {
+  #semanticText(req: ChatRequest): string | null {
     const users = req.messages.filter((m) => m.role === 'user');
     const assistants = req.messages.filter((m) => m.role === 'assistant');
     return users.length === 1 && assistants.length === 0 ? users[0].content.trim() : null;
   }
 
-  async function callWithTimeout(p: Provider, req: ChatRequest, parent?: AbortSignal): Promise<Completion> {
-    const signal = AbortSignal.any([AbortSignal.timeout(o.timeoutMs ?? 60_000), ...(parent ? [parent] : [])]);
+  /** Never rejects: an embedding or cache failure only means no semantic cache for this request. */
+  async #semanticLookup(ctx: CallContext, scope: string, question: string): Promise<SemanticLookup> {
+    let embedding: number[];
+    try {
+      embedding = await this.#embed!(question);
+    } catch (err) {
+      this.#report(err, 'embed');
+      return { question, embedding: null, similar: null };
+    }
+    const similar = await this.#bestEffort('cache-read', () => this.#cache!.findSimilar(scope, embedding, this.#threshold), null);
+    if (similar && this.#semanticMode === 'shadow') {
+      // Would have served this: report the pair for labelling. The model is called anyway.
+      try {
+        this.#onShadowHit?.({ tenantId: ctx.tenantId, question, cachedQuestion: similar.value.question, similarity: similar.similarity });
+      } catch (err) {
+        this.#report(err, 'cache-read');
+      }
+    }
+    return { question, embedding, similar };
+  }
+
+  async #reserve(req: ChatRequest, ctx: CallContext, record: (u: Accounting) => void): Promise<Reservation | null> {
+    const budget = this.#budget;
+    if (!budget) return null;
+    // Settle in the period we reserved in, even if the month rolls over while the model generates.
+    const period = new Date(this.#now()).toISOString().slice(0, 7); // 'YYYY-MM'
+    const limit = await budget.monthlyLimitUsd(ctx.tenantId);
+    const estimate = budget.estimateUsd?.(req) ?? defaultEstimateUsd(this.#prices, this.#providers.map((p) => p.model), req);
+    // A budget store that is down fails the request: a budget is a control, and it fails closed.
+    if (!(await budget.store.reserve(ctx.tenantId, period, estimate, limit))) {
+      record({ provider: null, model: null, cache: 'bypass', inputTokens: 0, outputTokens: 0, costUsd: 0, fallbackFrom: [], ok: false, error: 'budget exceeded' });
+      throw new BudgetExceededError(`monthly LLM budget of $${limit} reached for tenant ${ctx.tenantId}`);
+    }
+    let settled = false;
+    return {
+      settle: async (actualUsd) => {
+        if (settled) return;
+        settled = true;
+        try {
+          await budget.store.settle(ctx.tenantId, period, estimate, actualUsd);
+        } catch (err) {
+          this.#report(err, 'budget-settle');
+        }
+      },
+    };
+  }
+
+  async #callChain(req: ChatRequest, ctx: CallContext, record: (u: Accounting) => void) {
+    const errors: unknown[] = [];
+    const fallbackFrom: string[] = [];
+    for (const provider of this.#providers) {
+      ctx.signal?.throwIfAborted();
+      const breaker = this.#breakers.get(provider.name)!;
+      if (!breaker.tryAcquire()) {
+        fallbackFrom.push(provider.name);
+        errors.push(new ProviderError(`${provider.name}: circuit open`));
+        continue;
+      }
+      try {
+        const completion = await this.#callWithTimeout(provider, req, ctx.signal);
+        breaker.success();
+        return { provider, completion, fallbackFrom };
+      } catch (err) {
+        errors.push(err);
+        if (ctx.signal?.aborted) throw err; // cancelled by the caller: says nothing about the provider
+        const retryable = err instanceof ProviderError ? err.retryable : true;
+        if (!retryable) {
+          breaker.success(); // it answered; the request was the problem
+          record({ provider: provider.name, model: provider.model, cache: 'bypass', inputTokens: 0, outputTokens: 0, costUsd: 0, fallbackFrom, ok: false, error: String(err) });
+          throw err; // a malformed request fails the same way everywhere — don't burn the fallback
+        }
+        breaker.failure();
+        fallbackFrom.push(provider.name);
+      }
+    }
+    record({ provider: null, model: null, cache: 'bypass', inputTokens: 0, outputTokens: 0, costUsd: 0, fallbackFrom, ok: false, error: 'all providers failed' });
+    throw new AllProvidersFailedError(errors);
+  }
+
+  async #callWithTimeout(p: Provider, req: ChatRequest, parent?: AbortSignal): Promise<Completion> {
+    const signal = AbortSignal.any([AbortSignal.timeout(this.#timeoutMs), ...(parent ? [parent] : [])]);
     let onAbort: () => void = () => {};
     const aborted = new Promise<never>((_, reject) => {
       onAbort = () => reject(new ProviderError(`${p.name}: ${parent?.aborted ? 'cancelled' : 'timeout'}`, { retryable: !parent?.aborted }));
       signal.addEventListener('abort', onAbort, { once: true });
     });
+    aborted.catch(() => {});
     try {
       const call = p.complete(req, signal);
       call.catch(() => {}); // the race loser may reject later
@@ -211,124 +409,46 @@ export function createGateway(o: GatewayOptions) {
     }
   }
 
-  async function chat(req: ChatRequest, ctx: CallContext) {
-    const started = now();
-    const base = { tenantId: ctx.tenantId, userId: ctx.userId, feature: ctx.feature };
-    const record = (u: Omit<UsageRecord, 'tenantId' | 'userId' | 'feature' | 'latencyMs'>) => {
-      try {
-        const r = o.onUsage?.({ ...base, ...u, latencyMs: now() - started });
-        if (r && typeof (r as Promise<unknown>).catch === 'function') (r as Promise<unknown>).catch((e) => o.onUsageError?.(e));
-      } catch (e) {
-        o.onUsageError?.(e);
-      }
-    };
-
-    // 1. Caches first: a hit costs nothing, so it's served even to a tenant that's out of budget.
-    const mode = o.cache ? cacheMode(req) : 'bypass';
-    const scope = scopeOf(ctx, req);
-    const exactKey = sha256(JSON.stringify([scope, req.messages, req.maxTokens ?? null]));
-    let embedding: number[] | null = null;
-    let semanticQuestion: string | null = null;
-    if (mode === 'eligible' && o.cache) {
-      const hit = await o.cache.getExact(exactKey);
-      if (hit) {
-        record({ provider: hit.provider, model: hit.model, cache: 'exact', inputTokens: 0, outputTokens: 0, costUsd: 0, fallbackFrom: [], ok: true });
-        return { ...hit, cache: 'exact' as const, costUsd: 0, fallbackFrom: [] as string[] };
-      }
-      if (semanticText(req) && o.embed && semanticMode !== 'off') {
-        semanticQuestion = semanticText(req);
-        embedding = await o.embed(semanticQuestion!);
-        const similar = await o.cache.findSimilar(scope, embedding, threshold);
-        if (similar && semanticMode === 'serve') {
-          record({ provider: similar.value.provider, model: similar.value.model, cache: 'semantic', inputTokens: 0, outputTokens: 0, costUsd: 0, fallbackFrom: [], ok: true });
-          return { ...similar.value, cache: 'semantic' as const, similarity: similar.similarity, costUsd: 0, fallbackFrom: [] as string[] };
-        }
-        if (similar) {
-          // Shadow: would have served this — log the pair for labelling, then call the model anyway.
-          o.onShadowHit?.({ tenantId: ctx.tenantId, question: semanticQuestion!, cachedQuestion: similar.value.question, similarity: similar.similarity });
-        }
-      }
+  async #remember(scope: string, exactKey: string, value: CachedResponse, semantic: Promise<SemanticLookup> | null, fromFallback: boolean) {
+    const ttl = fromFallback ? this.#fallbackTtlSec : this.#ttlSec;
+    if (ttl <= 0) return;
+    await this.#bestEffort('cache-write', () => this.#cache!.setExact(exactKey, value, ttl), undefined);
+    const lookup = semantic && (await semantic);
+    if (lookup?.embedding) {
+      const embedding = lookup.embedding;
+      await this.#bestEffort('cache-write', () => this.#cache!.saveSimilar(scope, embedding, { ...value, question: lookup.question }, ttl), undefined);
     }
+  }
 
-    // 2. Budget: atomically reserve a pessimistic estimate before spending; settle with the real cost.
-    let reserved = 0;
-    // Settle in the period we reserved in, even if the month rolls over while the model generates.
-    const budgetPeriod = period();
-    if (o.budget) {
-      const limit = await o.budget.monthlyLimitUsd(ctx.tenantId);
-      const estimate = o.budget.estimateUsd?.(req) ?? defaultEstimateUsd(o.prices, o.providers.map((p) => p.model), req);
-      if (!(await o.budget.store.reserve(ctx.tenantId, budgetPeriod, estimate, limit))) {
-        record({ provider: null, model: null, cache: 'bypass', inputTokens: 0, outputTokens: 0, costUsd: 0, fallbackFrom: [], ok: false, error: 'budget exceeded' });
-        throw new BudgetExceededError(`monthly LLM budget of $${limit} reached for tenant ${ctx.tenantId}`);
-      }
-      reserved = estimate;
-    }
-    let settled = false;
-    const settle = async (actual: number) => {
-      if (!o.budget || settled) return;
-      settled = true;
-      await o.budget.store.settle(ctx.tenantId, budgetPeriod, reserved, actual);
-    };
-
+  #record(ctx: CallContext, started: number, u: Accounting) {
+    const usageError = (err: unknown) => (this.#onUsageError ? this.#onUsageError(err) : this.#report(err, 'usage'));
     try {
-      return await callProviders(req, ctx, mode, scope, exactKey, embedding, semanticQuestion, record, settle);
-    } finally {
-      await settle(0); // no-op if the success path already settled; releases the reservation on failure
+      const r = this.#onUsage?.({ tenantId: ctx.tenantId, userId: ctx.userId, feature: ctx.feature, ...u, latencyMs: this.#now() - started });
+      if (r && typeof (r as Promise<unknown>).catch === 'function') (r as Promise<unknown>).catch(usageError);
+    } catch (err) {
+      usageError(err);
     }
   }
 
-  async function callProviders(
-    req: ChatRequest,
-    ctx: CallContext,
-    mode: 'eligible' | 'bypass',
-    scope: string,
-    exactKey: string,
-    embedding: number[] | null,
-    semanticQuestion: string | null,
-    record: (u: Omit<UsageRecord, 'tenantId' | 'userId' | 'feature' | 'latencyMs'>) => void,
-    settle: (actual: number) => Promise<void>,
-  ) {
-    // 3. Provider chain.
-    const errors: unknown[] = [];
-    const fallbackFrom: string[] = [];
-    for (const p of o.providers) {
-      const b = breakers.get(p.name) ?? { failures: 0, openUntil: 0 };
-      breakers.set(p.name, b);
-      if (now() < b.openUntil) {
-        fallbackFrom.push(p.name);
-        errors.push(new ProviderError(`${p.name}: circuit open`));
-        continue;
-      }
-      try {
-        const out = await callWithTimeout(p, req, ctx.signal);
-        b.failures = 0;
-        const cost = costUsd(o.prices, p.model, out.usage);
-        await settle(cost);
-        const value: CachedResponse = { content: out.content, model: p.model, provider: p.name };
-        if (mode === 'eligible' && o.cache) {
-          await o.cache.setExact(exactKey, value, ttl);
-          if (embedding) await o.cache.saveSimilar(scope, embedding, { ...value, question: semanticQuestion ?? undefined }, ttl);
-        }
-        record({ provider: p.name, model: p.model, cache: mode === 'eligible' ? 'miss' : 'bypass', ...out.usage, costUsd: cost, fallbackFrom, ok: true });
-        return { ...value, cache: mode === 'eligible' ? ('miss' as const) : ('bypass' as const), usage: out.usage, costUsd: cost, fallbackFrom };
-      } catch (err) {
-        errors.push(err);
-        const retryable = err instanceof ProviderError ? err.retryable : true;
-        if (!retryable) {
-          record({ provider: p.name, model: p.model, cache: 'bypass', inputTokens: 0, outputTokens: 0, costUsd: 0, fallbackFrom, ok: false, error: String(err) });
-          throw err; // a malformed request fails the same way everywhere — don't burn the fallback
-        }
-        if (ctx.signal?.aborted) throw err;
-        if (++b.failures >= breakerCfg.threshold) b.openUntil = now() + breakerCfg.cooldownMs;
-        fallbackFrom.push(p.name);
-      }
+  async #bestEffort<T>(stage: GatewayStage, op: () => Promise<T>, fallback: T): Promise<T> {
+    try {
+      return await op();
+    } catch (err) {
+      this.#report(err, stage);
+      return fallback;
     }
-    record({ provider: null, model: null, cache: 'bypass', inputTokens: 0, outputTokens: 0, costUsd: 0, fallbackFrom, ok: false, error: 'all providers failed' });
-    throw new AllProvidersFailedError(errors);
   }
 
-  return { chat };
+  #report(err: unknown, stage: GatewayStage) {
+    try {
+      this.#onError?.(err, stage);
+    } catch {
+      // an error hook that throws must not take the request down with it
+    }
+  }
 }
+
+export const createGateway = (o: GatewayOptions) => new LlmGateway(o);
 
 // ---------- In-memory stores (dev/tests; use Redis/Postgres in production) ----------
 

@@ -4,38 +4,23 @@
 // leak to the next request that reuses the pooled connection (safe with PgBouncer
 // in transaction mode, too).
 import type pg from 'pg';
+import { withTransaction } from './pg-transaction.ts';
 
 const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 
-/** tenantId must come from the authenticated session/JWT claim, never from the request body. */
+/**
+ * Runs `fn` in a transaction scoped to one tenant. tenantId must come from the authenticated session/JWT claim,
+ * never from the request body. If the server ends the connection mid-transaction (failover,
+ * idle_in_transaction_session_timeout), only this call fails; the process and the pool carry on.
+ */
 export async function withTenant<T>(pool: pg.Pool, tenantId: string, fn: (client: pg.PoolClient) => Promise<T>): Promise<T> {
   if (!UUID_RE.test(tenantId)) throw new Error('invalid tenant id');
-  const client = await pool.connect();
-  // If the server ends this connection between two queries (failover, idle_in_transaction_session_timeout),
-  // pg emits 'error' on the client. Unheard while it is checked out, that crashes the whole process; heard,
-  // only this request fails (its next query rejects) and the pool drops the dead client.
-  let lost: Error | undefined;
-  const onLost = (err: Error) => {
-    lost = err;
-  };
-  client.on('error', onLost);
-  try {
-    // BEGIN and set_config in one round trip (a parameterized query can't share a call with BEGIN).
-    // RLS itself costs ~nothing; the round trips around it are what a request pays: this cuts a
-    // primary-key lookup from 4 round trips to 3, 19% faster on a fast network (docs/performance.md).
-    // Inlining is safe ONLY because UUID_RE above lets nothing but hex digits and dashes through.
-    // Never inline a value that hasn't passed a check this strict.
-    await client.query(`BEGIN; SELECT set_config('app.tenant_id', '${tenantId}', true)`);
-    const result = await fn(client);
-    await client.query('COMMIT');
-    return result;
-  } catch (e) {
-    await client.query('ROLLBACK').catch(() => {});
-    throw e;
-  } finally {
-    client.off('error', onLost);
-    client.release(lost);
-  }
+  // BEGIN and set_config in one round trip (a parameterized query can't share a call with BEGIN).
+  // RLS itself costs ~nothing; the round trips around it are what a request pays: this cuts a
+  // primary-key lookup from 4 round trips to 3, 19% faster on a fast network (docs/performance.md).
+  // Inlining is safe ONLY because UUID_RE above lets nothing but hex digits and dashes through.
+  // Never inline a value that hasn't passed a check this strict.
+  return withTransaction(pool, (client) => fn(client), { begin: `BEGIN; SELECT set_config('app.tenant_id', '${tenantId}', true)` });
 }
 
 export interface HybridSearchParams {

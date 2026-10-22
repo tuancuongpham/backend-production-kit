@@ -67,7 +67,7 @@ describe('llm-tool-safety', () => {
   });
   after(async () => pool?.end());
   beforeEach(async () => {
-    await pool.query(`TRUNCATE refunds, customers, tool_approvals, tool_results, tool_audit`);
+    await pool.query(`TRUNCATE refunds, customers, tool_approvals, tool_results, tool_audit, tool_sessions`);
     await pool.query(`INSERT INTO customers (id, tenant_id) VALUES ('c-1', 't1'), ('c-2', 't1')`);
   });
 
@@ -91,7 +91,7 @@ describe('llm-tool-safety', () => {
     const { approvalId } = attempt as { approvalId: string };
     const pending = (await pool.query(`SELECT args, reason FROM tool_approvals WHERE id = $1`, [approvalId])).rows[0];
     assert.deepEqual(pending, { args: { orderId: 'o-7', amountVnd: 5_000_000, reason: 'other' }, reason: 'write tool after untrusted content entered the context' });
-    assert.equal(await guard.decide(approvalId, 'u1', 'denied'), true);
+    assert.equal(await guard.decide(approvalId, { tenantId: 't1', userId: 'u1' }, 'denied'), true);
     assert.deepEqual(await s.call('refund_order', { orderId: 'o-7', amountVnd: 5_000_000, reason: 'other' }, { approvalId }), {
       status: 'rejected',
       reason: 'the approval is denied',
@@ -104,8 +104,8 @@ describe('llm-tool-safety', () => {
     const ask = await s.call('delete_customer', { customerId: 'c-1' });
     assert.equal(ask.status, 'approval_required', 'even in a clean context');
     const { approvalId } = ask as { approvalId: string };
-    assert.equal(await guard.decide(approvalId, 'u1', 'approved'), false, 'the requester can not approve a four-eyes tool');
-    assert.equal(await guard.decide(approvalId, 'admin-2', 'approved'), true);
+    assert.equal(await guard.decide(approvalId, { tenantId: 't1', userId: 'u1' }, 'approved'), false, 'the requester can not approve a four-eyes tool');
+    assert.equal(await guard.decide(approvalId, { tenantId: 't1', userId: 'admin-2' }, 'approved'), true);
 
     assert.deepEqual(await s.call('delete_customer', { customerId: 'c-2' }, { approvalId }), {
       status: 'rejected',
@@ -117,7 +117,7 @@ describe('llm-tool-safety', () => {
     assert.deepEqual(await s.call('delete_customer', { customerId: 'c-1' }, { approvalId }), { status: 'rejected', reason: 'the approval was already used' });
 
     const late = (await s.call('delete_customer', { customerId: 'c-2' })) as { approvalId: string };
-    await guard.decide(late.approvalId, 'admin-2', 'approved');
+    await guard.decide(late.approvalId, { tenantId: 't1', userId: 'admin-2' }, 'approved');
     await pool.query(`UPDATE tool_approvals SET expires_at = now() - interval '1 second' WHERE id = $1`, [late.approvalId]);
     assert.deepEqual(await s.call('delete_customer', { customerId: 'c-2' }, { approvalId: late.approvalId }), { status: 'rejected', reason: 'the approval has expired' });
     assert.deepEqual((await pool.query(`SELECT id FROM customers WHERE deleted ORDER BY id`)).rows, [{ id: 'c-1' }]);

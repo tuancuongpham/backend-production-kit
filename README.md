@@ -74,6 +74,17 @@ found in it (several are classic production incidents), now fixed and guarded by
 | Postgres ends a connection mid-transaction (failover, `idle_in_transaction_session_timeout`) | **the whole Node process crashes**, with every in-flight request | only that request fails; tested in every skill that holds a connection |
 | Hybrid search given a question instead of keywords ("làm sao để thanh toán qua vnpay?") | the keyword side required **every word**, so it matched **none of 10 questions** and left them all to the embeddings | every word first, any word as a fallback: the keyword side finds 10 of 10, search-box ranking unchanged |
 | Outbox relay loses its database connection mid-batch | it **kept publishing the rest of the batch**, and all of it went out again on the next run | stops at once: only the message in flight goes out twice |
+| A webhook handler slower than `stuckAfterSec` (5 min) | a second worker claimed the "stuck" event and ran the handler alongside the first: **the payment was credited twice** | only the holder of the current claim may finish an event: credited once |
+| The cache store fails after the LLM already answered | treated as a provider failure: the gateway **bought the answer again** from the fallback, counted a failure against the healthy provider and left the budget reservation stuck | the answer is returned; the cache error is reported |
+| The agent reads a poisoned email, then its next turn arrives as a new request | the "untrusted content" flag lived in process memory, so **the write ran without approval** | the flag is stored with the conversation: the write waits for a human |
+| A timed-out charge request fails after a retry took over its key | it deleted the retry's claim, so **a third retry charged again** | only the holder of the current claim token may release it: the third gets 409 |
+| Jobs claimed in a batch behind a slow one | only the running job was heartbeated: the others expired, and could **go dead without ever running** | one heartbeat renews every job the batch holds |
+| Two schedulers process the same erasure request | the slower one reopened it after the subject id was erased: **retried forever with nobody to erase** | each request is leased to one run at a time |
+| The agent's read-only DB pool when Postgres drops an idle connection | **the process crashed** (no `error` listener); a black-holed database **hung every tool call** forever | the pool listens and times out: the call fails in about 3 s |
+| A dependency's circuit breaker ends its cooldown | every waiting request went to the dependency that was still down: **10 calls instead of 1 probe** | a real half-open state, shared by the gateway, limiter and cache |
+
+The last review round listed 34 hypotheses about what could break and wrote each as a test. All 34 failed on the
+previous release, and all are fixed ([`latent-bugs-round3.test.ts`](verify/tests/latent-bugs-round3.test.ts)).
 
 ## Incidents it is tested against
 
@@ -108,6 +119,8 @@ reference code ships the winner ([every table, plan and trade-off](docs/performa
 | Schema change on a live 1M-row table | plain DDL vs `lock_timeout` + retry, `CONCURRENTLY`, `NOT VALID` + `VALIDATE` | the safe forms, plus a migration linter | reads wait 52 ms behind a blocked `ALTER`, not 1 s; inserts wait 2 ms during an index build, not 1.5 s |
 | A hot cache key expiring under load | cache-aside vs single-flight per process vs single-flight + Redis lock | Redis lock + stale-while-revalidate | 4 instances × 50 requests: 1 origin call instead of 200; 0.7 ms instead of 141 ms while the entry is stale |
 | Keyword side of hybrid search | every word vs any word vs every word, then any | the fallback | questions: recall@5 0.5 → 1.0; search-box queries keep MRR 1.0 (any-word alone drops it to 0.74) |
+| Semantic cache lookup in shadow mode | before the model call vs beside it | beside it | 108 ms per request instead of 206 ms (100 ms embedding, 100 ms model) |
+| A black-holed Redis behind the cache | a 50 ms timeout per request vs a circuit breaker | breaker | 20 requests: 181 ms instead of 1,236 ms |
 | Tenant transaction (RLS) | 4 round trips vs 3 | 3 | 19% faster per request; RLS itself costs ~0 |
 | Rate limiter client | ioredis defaults vs auto-pipelining | defaults (kept) | auto-pipelining was 11% slower |
 | PII redaction | hints vs no hints vs one combined regex | hints (kept) | 1.3–4.7× faster than the alternatives |
@@ -167,6 +180,16 @@ on its own.
 
 Each `SKILL.md` lists the decisions to ask about (with defaults and reasons), the implementation steps backed by
 reference code, the properties that must be proven by tests, and the mistakes it exists to prevent.
+
+## How the reference code is built
+
+- **Classes for what has state and a lifecycle** (workers, the gateway, the limiter, the cache, the tool guard),
+  with dependencies passed in and checked at startup. **Functions for pure logic** (metrics, linters, signatures).
+- **Ports at the edges**: a broker, a model provider, a store or a codec is an adapter you plug in, with no change to
+  the core.
+- **A small shared kernel** (transactions that survive a dead connection, a half-open circuit breaker, deadlines,
+  worker loops), vendored into each skill and kept identical by CI.
+- **Nine invariants** every skill keeps, each one a bug this kit once had: [docs/architecture.md](docs/architecture.md).
 
 ## Run the checks yourself
 

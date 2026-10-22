@@ -41,10 +41,13 @@ golden set (real queries → relevant chunk ids, tagged by type)
 2. **Score retrieval** with `evaluateRetriever(golden, retrieve, k)` from
    [references/retrieval-eval.ts](references/retrieval-eval.ts). The retriever is any function from a query to
    ranked ids, so the same harness checks hybrid search, each retriever alone, a reranker or a new embedding model.
-   Score each retriever alone too: the fused number hides which side does the work.
+   Score each retriever alone too: the fused number hides which side does the work. Duplicate ids count once, so
+   evaluating at the document level (chunks mapped to their documents) can't push recall above 1.
 3. **Gate in CI.** Score main and the branch, then call `compareReports(baseline, candidate)`. Post `toMarkdown(…)`
    as a PR comment, and fail the job when `pass` is false. The comment lists the queries that lost results, which
-   is where debugging starts.
+   is where debugging starts. Both runs are compared on the queries they share, and added or removed queries are
+   listed: a pull request that adds hard questions to the golden set lowers the average without anything getting
+   worse, and must not fail the gate for it.
 4. **Judge answers** with [references/judge.ts](references/judge.ts).
    - Ask one property at a time (`GROUNDEDNESS_PROMPT`: is every claim supported by the context?).
    - Before trusting a judge, run it on human-labelled answers and check `judgeAgreement(…)`: kappa, and above all
@@ -66,6 +69,9 @@ golden set (real queries → relevant chunk ids, tagged by type)
 - Cohen's kappa on worked examples.
 - A cheap judge that looks 83% accurate has a kappa of only 0.57 and passed "every order ships free". The agreement
   report shows it before anyone gates on it.
+- [latent-bugs-round3.test.ts](../../verify/tests/latent-bugs-round3.test.ts): a retriever returning one document
+  twice scores recall 1, not 2; adding a hard question to the golden set passes the gate; an answer containing
+  `$&`, `$'` or `{{context}}` reaches the judge prompt as written.
 
 How to write these tests so they prove something:
 - Feed the gate a realistic broken retriever (a removed normalization, a smaller candidate pool, another model) and
@@ -90,3 +96,5 @@ ADR: golden set source, size and refresh cadence, slices, k, gate thresholds, ju
 - Trusting an LLM judge's pass rate without measuring it against humans. It fails in one direction: it passes
   confident, unsupported answers.
 - Evaluating with k larger than what the prompt receives.
+- Filling a prompt template with `replace(placeholder, text)`. In a replacement string, `$&` and `$'` are patterns,
+  so an answer containing them reaches the judge mangled. Use a replacer function, in one pass.

@@ -74,6 +74,17 @@ mẫu (nhiều cái là sự cố production kinh điển), nay đã sửa và c
 | Postgres ngắt kết nối giữa transaction (failover, `idle_in_transaction_session_timeout`) | **cả process Node bị sập**, kéo theo mọi request đang xử lý | chỉ request đó lỗi; có test ở mọi skill giữ kết nối |
 | Hybrid search nhận câu hỏi thay vì từ khóa ("làm sao để thanh toán qua vnpay?") | phần tìm theo từ khóa đòi **khớp mọi từ**, nên **không khớp câu nào trong 10 câu hỏi**, phó mặc hoàn toàn cho embedding | khớp mọi từ trước, không có thì khớp bất kỳ từ nào: phần từ khóa tìm đúng 10/10, xếp hạng truy vấn kiểu ô tìm kiếm không đổi |
 | Relay outbox mất kết nối database giữa một lô | **vẫn publish tiếp phần còn lại của lô**, và cả lô bị gửi lại ở lần chạy sau | dừng ngay: chỉ message đang gửi dở bị gửi hai lần |
+| Handler webhook chạy lâu hơn `stuckAfterSec` (5 phút) | worker thứ hai coi event là "kẹt", lấy lại và chạy handler song song với lần đầu: **thanh toán bị cộng tiền hai lần** | chỉ worker đang giữ claim hiện tại mới được hoàn tất event: cộng tiền một lần |
+| Cache store lỗi sau khi LLM đã trả lời | bị coi như provider lỗi: gateway **mua lại câu trả lời** từ model dự phòng, tính lỗi cho provider đang khỏe và để kẹt phần ngân sách đã giữ chỗ | trả về câu trả lời; lỗi cache được báo cáo |
+| Agent đọc một email bị cài lệnh, rồi lượt kế tiếp đến bằng một request mới | cờ "có nội dung không tin cậy" chỉ nằm trong bộ nhớ process, nên **thao tác ghi chạy mà không cần duyệt** | cờ được lưu theo cuộc hội thoại: thao tác ghi phải chờ người duyệt |
+| Request trừ tiền bị timeout rồi lỗi, sau khi một lần retry đã tiếp quản key | nó xóa claim của lần retry, nên **lần retry thứ ba trừ tiền thêm lần nữa** | chỉ bên giữ claim token hiện tại mới được giải phóng: lần thứ ba nhận 409 |
+| Job được claim theo lô, xếp sau một job chậm | chỉ job đang chạy được heartbeat: các job còn lại hết lease, và có thể **thành dead mà chưa chạy lần nào** | một heartbeat gia hạn mọi job lô đang giữ |
+| Hai scheduler cùng xử lý một yêu cầu xóa dữ liệu | scheduler chậm hơn mở lại yêu cầu sau khi id người dùng đã bị xóa: **thử lại mãi mà không còn biết xóa của ai** | mỗi yêu cầu chỉ được một lần chạy giữ lease tại một thời điểm |
+| Pool DB chỉ đọc của agent khi Postgres ngắt một kết nối đang rảnh | **process bị sập** (không có listener `error`); database rơi vào hố đen thì **mọi tool call treo** mãi mãi | pool có listener và timeout: lời gọi lỗi sau khoảng 3 giây |
+| Circuit breaker của một dependency hết thời gian chờ | mọi request đang đợi cùng gọi vào dependency vẫn còn chết: **10 lần gọi thay vì 1 lần thăm dò** | có trạng thái half-open thật, dùng chung cho gateway, rate limiter và cache |
+
+Vòng rà soát gần nhất đặt ra 34 giả thuyết về chỗ có thể hỏng và viết mỗi giả thuyết thành một test. Cả 34 đều fail
+trên bản phát hành trước, và đều đã được sửa ([`latent-bugs-round3.test.ts`](../../verify/tests/latent-bugs-round3.test.ts)).
 
 ## Đã được test với các sự cố thật
 
@@ -108,6 +119,8 @@ dùng phương án thắng ([toàn bộ bảng số, query plan và đánh đổ
 | Đổi schema trên bảng 1 triệu dòng đang chạy | DDL thường, `lock_timeout` + retry, `CONCURRENTLY`, `NOT VALID` + `VALIDATE` | các dạng an toàn, kèm bộ lint migration | lệnh đọc chờ 52 ms sau một `ALTER` bị chặn thay vì 1 giây; lệnh insert chờ 2 ms khi build index thay vì 1,5 giây |
 | Key cache nóng hết hạn khi tải cao | cache-aside, single-flight trong từng process, single-flight + khóa Redis | khóa Redis + stale-while-revalidate | 4 instance × 50 request: 1 lần gọi nguồn thay vì 200; 0,7 ms thay vì 141 ms khi entry đã cũ |
 | Phần từ khóa của hybrid search | khớp mọi từ, khớp bất kỳ từ nào, khớp mọi từ rồi mới tới bất kỳ từ nào | phương án fallback | câu hỏi: recall@5 0,5 → 1,0; truy vấn kiểu ô tìm kiếm giữ MRR 1,0 (chỉ khớp bất kỳ từ nào thì tụt còn 0,74) |
+| Tra cứu semantic cache ở chế độ shadow | trước lời gọi model, song song với lời gọi model | song song | 108 ms mỗi request thay vì 206 ms (embedding 100 ms, model 100 ms) |
+| Redis rơi vào hố đen phía sau cache | timeout 50 ms cho mỗi request, circuit breaker | breaker | 20 request: 181 ms thay vì 1.236 ms |
 | Transaction theo tenant (RLS) | 4 round trip, 3 round trip | 3 | mỗi request nhanh hơn 19%; bản thân RLS gần như không tốn gì |
 | Client của rate limiter | mặc định của ioredis, auto-pipelining | mặc định (giữ nguyên) | auto-pipelining chậm hơn 11% |
 | Che PII | có hint, không hint, một regex gộp | có hint (giữ nguyên) | nhanh hơn 1,3–4,7 lần so với các phương án khác |
@@ -158,6 +171,15 @@ theo khách"); skill phù hợp sẽ tự được nạp.
 | [`data-retention-and-erasure`](../../skills/data-retention-and-erasure/SKILL.md) | xử lý yêu cầu xóa hoặc xuất dữ liệu cá nhân (GDPR, Nghị định 13/2023) và thời hạn lưu trữ |
 | [`sse-streaming`](../../skills/sse-streaming/SKILL.md) | stream token hoặc cập nhật thời gian thực lên trình duyệt |
 | [`adr-writer`](../../skills/adr-writer/SKILL.md) | ghi lại quyết định thiết kế, benchmark, bài phân tích |
+
+## Code mẫu được xây dựng thế nào
+
+- **Class cho thành phần có trạng thái và vòng đời** (worker, gateway, rate limiter, cache, tool guard), nhận
+  dependency qua tham số và kiểm tra cấu hình ngay khi khởi động. **Hàm cho logic thuần** (metric, linter, chữ ký).
+- **Port ở biên**: broker, model provider, store hay codec là adapter cắm vào, không phải sửa phần lõi.
+- **Một bộ khung dùng chung nhỏ** (transaction chịu được kết nối chết, circuit breaker half-open, deadline, vòng lặp
+  worker), được chép vào từng skill và CI giữ cho các bản chép giống hệt nhau.
+- **Chín bất biến** mọi skill đều giữ, mỗi cái là một bug bộ kit từng mắc: [docs/architecture.md](../architecture.md).
 
 ## Tự kiểm chứng
 

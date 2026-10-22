@@ -30,8 +30,13 @@ const sdk = new NodeSDK({
 
 sdk.start();
 
-// Flush on shutdown, or the last (often most interesting) spans before a crash are lost.
-// With the service-hardening skill, register sdk.shutdown() as an onShutdown hook instead.
-process.once('SIGTERM', () => {
-  sdk.shutdown().catch((e) => console.error('otel shutdown failed', e));
-});
+/**
+ * Flush the last spans, or the most interesting ones (right before a deploy or a crash) are lost. Call it from
+ * your graceful shutdown, after the HTTP drain: with service-hardening, `onShutdown: [shutdownTelemetry]`. The app
+ * imports it from this same module (`import { shutdownTelemetry } from './otel-setup.ts'`); ESM loads a module
+ * once, so that is the instance --import started.
+ * There is deliberately no process.on('SIGTERM') here. Any SIGTERM listener replaces Node's default exit: one
+ * that only flushes leaves the process running until the orchestrator's SIGKILL, and one that exits cuts the
+ * graceful drain short.
+ */
+export const shutdownTelemetry = () => sdk.shutdown();

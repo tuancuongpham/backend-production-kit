@@ -61,9 +61,12 @@ cron:     tick() on every instance → each fire enqueued exactly once
    - The maintenance loop rescues jobs whose lease expired and promotes due delayed jobs, about once a second, on
      every instance (SKIP LOCKED makes that safe).
    - A delayed job starts within about `maintainEveryMs + idleMs` of its `run_at`.
-   - On SIGTERM, abort the signal and `await` the promise in the shutdown hook (`service-hardening`), so running
-     jobs finish instead of waiting out their lease.
-   - Leave `batchSize` at 1 unless jobs are tiny; a loop renews each queued job's lease before starting it.
+   - On SIGTERM, abort the signal and `await` the promise in the shutdown hook (`service-hardening`). Running jobs
+     finish; jobs claimed but not started go back to the queue at once (`released`), their attempt not spent.
+   - Leave `batchSize` at 1 unless jobs are tiny. With a batch, one heartbeat renews the lease of every job the
+     batch holds, the waiting ones too, so a job queued behind a slow one can't expire and burn an attempt unrun.
+   - Copy `pg-transaction.ts` and `worker-loop.ts` along with `jobs.ts`: they are the kit's shared building blocks,
+     identical in every skill that has them.
 5. **Recurring jobs.** Call `createScheduler({ pool, schedules: [{ name, kind, next: every(3_600_000) }] }).tick()`
    every few seconds from every instance.
    - Each due fire is enqueued exactly once: the schedule row is locked and moved forward in the transaction that
@@ -92,6 +95,9 @@ Against real Postgres. [verify/tests/job-queue.test.ts](../../verify/tests/job-q
 - **Three scheduler instances ticking 30 times at once → each fire enqueued exactly once.** A fire while the previous
   run is queued is dropped. Three days of missed fires become one run.
 - `run()` drains with four loops in parallel, including delayed jobs, and stopping leaves nothing `running`.
+- A batch of 3 slow jobs on a 1 s lease, with another instance rescuing expired leases every 100 ms → all 3 run,
+  none dies unrun. Stopping mid-batch waits for the running job only and hands the other 2 back with
+  `attempts` 0 ([latent-bugs-round3.test.ts](../../verify/tests/latent-bugs-round3.test.ts)).
 - `pruneJobs` deletes old finished jobs in batches and keeps dead and recent ones; `job_queue_stats` reports depth
   and the oldest wait.
 
@@ -120,5 +126,7 @@ dead-letter alert owner.
   long job is "rescued" and runs twice.
 - Retrying at once, or at fixed intervals: every failed job hits the recovering provider at the same moment.
 - Completing a job without checking the lease: a worker that lost the job overwrites the newer run's outcome.
+- Heartbeating only the running job of a batch: the ones queued behind it expire, get rescued, and can go dead after
+  `max_attempts` without ever having run.
 - Racing a handler against a timeout without catching the losing promise: its late rejection crashes Node.
 - No retention: the table grows forever. With the wrong indexes, every claim slows down with it.

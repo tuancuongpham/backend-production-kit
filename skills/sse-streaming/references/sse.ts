@@ -17,8 +17,6 @@ export interface SseOptions {
   maxBufferedBytes?: number; // default 256 KiB
 }
 
-export type SseStream = ReturnType<typeof openSse>;
-
 function format(e: SseEvent): string {
   let out = '';
   if (e.id !== undefined) out += `id: ${e.id}\n`;
@@ -28,88 +26,103 @@ function format(e: SseEvent): string {
   return `${out}\n`;
 }
 
-export function openSse(req: http.IncomingMessage, res: http.ServerResponse, opts: SseOptions = {}) {
-  const maxBuffered = opts.maxBufferedBytes ?? 256 * 1024;
-  const opened = performance.now();
-  let firstEventAt: number | null = null;
-  let closed = false;
-  const ac = new AbortController();
+/** One open event stream. Closing it (or the client leaving) aborts `signal`: pass that to upstream work. */
+export class SseStream {
+  /** Aborted when the stream closes: cancels upstream LLM calls and subscriptions. */
+  readonly signal: AbortSignal;
+  /** The client's Last-Event-ID header when it reconnects. */
+  readonly lastEventId: string | undefined;
+  readonly #res: http.ServerResponse;
+  readonly #maxBuffered: number;
+  readonly #opened = performance.now();
+  readonly #ac = new AbortController();
+  readonly #heartbeat: NodeJS.Timeout;
+  #firstEventAt: number | null = null;
+  #closed = false;
 
-  res.writeHead(200, {
-    'content-type': 'text/event-stream; charset=utf-8',
-    'cache-control': 'no-cache, no-transform', // no-transform: stop proxies from gzipping/buffering
-    connection: 'keep-alive',
-    'x-accel-buffering': 'no', // nginx: don't buffer
-  });
-  res.write(`retry: ${opts.retryMs ?? 3000}\n\n`);
-
-  const heartbeat = setInterval(() => {
-    if (!closed) res.write(': ping\n\n');
-  }, opts.heartbeatMs ?? 15_000);
-  heartbeat.unref();
-
-  function close() {
-    if (closed) return;
-    closed = true;
-    clearInterval(heartbeat);
-    ac.abort(new Error('sse closed')); // cancels upstream LLM calls / subscriptions
-    if (!res.writableEnded) res.end();
-  }
-  /** Drop the connection now (no graceful end): for clients that stopped reading. */
-  function abort() {
-    if (!closed) {
-      closed = true;
-      clearInterval(heartbeat);
-      ac.abort(new Error('sse aborted'));
-    }
-    res.destroy();
-  }
-  req.on('close', close);
-  res.on('close', close);
-  res.on('error', close);
-
-  const waitForDrainOrClose = () =>
-    new Promise<void>((resolve) => {
-      const done = () => {
-        res.off('drain', done);
-        res.off('close', done);
-        resolve();
-      };
-      res.once('drain', done);
-      res.once('close', done);
+  constructor(req: http.IncomingMessage, res: http.ServerResponse, opts: SseOptions = {}) {
+    this.#res = res;
+    this.#maxBuffered = opts.maxBufferedBytes ?? 256 * 1024;
+    this.signal = this.#ac.signal;
+    this.lastEventId = typeof req.headers['last-event-id'] === 'string' ? req.headers['last-event-id'] : undefined;
+    res.writeHead(200, {
+      'content-type': 'text/event-stream; charset=utf-8',
+      'cache-control': 'no-cache, no-transform', // no-transform: stop proxies from gzipping/buffering
+      connection: 'keep-alive',
+      'x-accel-buffering': 'no', // nginx: don't buffer
     });
+    res.write(`retry: ${opts.retryMs ?? 3000}\n\n`);
+    this.#heartbeat = setInterval(() => {
+      if (!this.#closed) res.write(': ping\n\n');
+    }, opts.heartbeatMs ?? 15_000);
+    this.#heartbeat.unref();
+    const close = () => this.close();
+    req.on('close', close);
+    res.on('close', close);
+    res.on('error', close);
+  }
+
+  get closed(): boolean {
+    return this.#closed;
+  }
 
   /** Lossless: resolves once the socket can take more (backpressure propagates upstream). false = client gone. */
-  async function send(e: SseEvent): Promise<boolean> {
-    if (closed) return false;
-    firstEventAt ??= performance.now();
-    if (!res.write(format(e))) await waitForDrainOrClose();
-    return !closed;
+  async send(e: SseEvent): Promise<boolean> {
+    if (this.#closed) return false;
+    this.#firstEventAt ??= performance.now();
+    if (!this.#res.write(format(e))) await this.#drainOrClose();
+    return !this.#closed;
   }
 
   /** Lossy: for dashboards — if the client is behind, skip this update (send the latest state later). */
-  function trySend(e: SseEvent): boolean {
-    if (closed || res.writableLength > maxBuffered) return false;
-    firstEventAt ??= performance.now();
-    res.write(format(e));
+  trySend(e: SseEvent): boolean {
+    if (this.#closed || this.#res.writableLength > this.#maxBuffered) return false;
+    this.#firstEventAt ??= performance.now();
+    this.#res.write(format(e));
     return true;
   }
 
-  return {
-    send,
-    trySend,
-    close,
-    abort,
-    signal: ac.signal,
-    lastEventId: typeof req.headers['last-event-id'] === 'string' ? req.headers['last-event-id'] : undefined,
-    get closed() {
-      return closed;
-    },
-    /** Time to first event since the stream opened (TTFT for token streams). */
-    ttfbMs: () => (firstEventAt === null ? null : firstEventAt - opened),
-    bufferedBytes: () => res.writableLength,
-  };
+  close(): void {
+    if (this.#closed) return;
+    this.#closed = true;
+    clearInterval(this.#heartbeat);
+    this.#ac.abort(new Error('sse closed'));
+    if (!this.#res.writableEnded) this.#res.end();
+  }
+
+  /** Drop the connection now (no graceful end): for clients that stopped reading. */
+  abort(): void {
+    if (!this.#closed) {
+      this.#closed = true;
+      clearInterval(this.#heartbeat);
+      this.#ac.abort(new Error('sse aborted'));
+    }
+    this.#res.destroy();
+  }
+
+  /** Time to first event since the stream opened (TTFT for token streams). */
+  ttfbMs(): number | null {
+    return this.#firstEventAt === null ? null : this.#firstEventAt - this.#opened;
+  }
+
+  bufferedBytes(): number {
+    return this.#res.writableLength;
+  }
+
+  #drainOrClose(): Promise<void> {
+    return new Promise<void>((resolve) => {
+      const done = () => {
+        this.#res.off('drain', done);
+        this.#res.off('close', done);
+        resolve();
+      };
+      this.#res.once('drain', done);
+      this.#res.once('close', done);
+    });
+  }
 }
+
+export const openSse = (req: http.IncomingMessage, res: http.ServerResponse, opts: SseOptions = {}) => new SseStream(req, res, opts);
 
 /**
  * Stream LLM tokens. Pass `sse.signal` into the model call as well, so a disconnect stops
@@ -128,39 +141,57 @@ export async function streamTokens(sse: SseStream, tokens: AsyncIterable<string>
   return { tokens: n, ttftMs: sse.ttfbMs() };
 }
 
+export interface ReplayItem<T> {
+  id: number;
+  event?: string;
+  data: T;
+}
+
 /**
  * Bounded in-memory replay log for one channel (e.g. one tenant's dashboard feed).
  * Single instance only — with several app instances use Redis Streams (XADD / XRANGE by id)
  * or Postgres as the log, and pub/sub (Redis, LISTEN/NOTIFY) for the live fan-out.
  */
-export function createReplayBuffer<T>(capacity = 1000) {
-  let seq = 0;
-  const items: Array<{ id: number; event?: string; data: T }> = [];
-  const listeners = new Set<(e: { id: number; event?: string; data: T }) => void>();
+export class ReplayBuffer<T> {
+  readonly #capacity: number;
+  readonly #items: Array<ReplayItem<T>> = [];
+  readonly #listeners = new Set<(e: ReplayItem<T>) => void>();
+  #seq: number;
 
-  return {
-    append(data: T, event?: string) {
-      const item = { id: ++seq, event, data };
-      items.push(item);
-      if (items.length > capacity) items.shift();
-      for (const l of listeners) l(item);
-      return item.id;
-    },
-    /** Events after lastEventId, or 'reset' if the client is too far behind (it must re-fetch full state). */
-    since(lastEventId: string | undefined) {
-      if (lastEventId === undefined) return [];
-      const last = Number(lastEventId);
-      if (!Number.isInteger(last) || last < 0 || last > seq) return 'reset' as const;
-      const oldest = items[0]?.id ?? seq + 1;
-      if (last < oldest - 1) return 'reset' as const;
-      return items.filter((i) => i.id > last);
-    },
-    subscribe(fn: (e: { id: number; event?: string; data: T }) => void) {
-      listeners.add(fn);
-      return () => listeners.delete(fn);
-    },
-  };
+  constructor(capacity = 1000, now: () => number = Date.now) {
+    if (!Number.isInteger(capacity) || capacity < 1) throw new RangeError('replay buffer: capacity must be a positive integer');
+    this.#capacity = capacity;
+    // Ids start from the clock (milliseconds × 1000) rather than from 1, so they keep increasing across restarts:
+    // a Last-Event-ID from before a deploy is older than anything this process has and gets a 'reset', instead of
+    // the new process's events that happen to reuse its numbers. Exact while a process averages < 1,000 events/ms.
+    this.#seq = now() * 1000;
+  }
+
+  append(data: T, event?: string): number {
+    const item = { id: ++this.#seq, event, data };
+    this.#items.push(item);
+    if (this.#items.length > this.#capacity) this.#items.shift();
+    for (const l of this.#listeners) l(item);
+    return item.id;
+  }
+
+  /** Events after lastEventId, or 'reset' if this buffer can't tell what the client missed (it must re-fetch full state). */
+  since(lastEventId: string | undefined): Array<ReplayItem<T>> | 'reset' {
+    if (lastEventId === undefined) return [];
+    const last = Number(lastEventId);
+    if (!Number.isSafeInteger(last) || last < 0 || last > this.#seq) return 'reset';
+    const oldest = this.#items[0]?.id ?? this.#seq + 1;
+    if (last < oldest - 1) return 'reset'; // evicted, or from before this process started
+    return this.#items.filter((i) => i.id > last);
+  }
+
+  subscribe(fn: (e: ReplayItem<T>) => void): () => void {
+    this.#listeners.add(fn);
+    return () => this.#listeners.delete(fn);
+  }
 }
+
+export const createReplayBuffer = <T>(capacity = 1000) => new ReplayBuffer<T>(capacity);
 
 export interface FeedOptions {
   /**
@@ -174,10 +205,10 @@ export interface FeedOptions {
 }
 
 /** Replay what the client missed, then follow live events until it disconnects. */
-export async function serveFeed<T>(sse: SseStream, feed: ReturnType<typeof createReplayBuffer<T>>, opts: FeedOptions = {}) {
+export async function serveFeed<T>(sse: SseStream, feed: ReplayBuffer<T>, opts: FeedOptions = {}) {
   const maxQueue = opts.maxQueue ?? 1000;
   // Subscribe first, replay second, dedup by id: nothing published during replay is lost.
-  const queue: Array<{ id: number; event?: string; data: T }> = [];
+  const queue: Array<ReplayItem<T>> = [];
   let wake: (() => void) | null = null;
   const unsubscribe = feed.subscribe((e) => {
     if (sse.closed) return;

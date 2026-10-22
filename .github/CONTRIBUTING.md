@@ -34,12 +34,18 @@ npm run verify:down
   does what its skill claims, against real Postgres and Redis.
 - `evals/<name>/evals.json` — prompts and assertions for evaluating skills with skill-creator. They live outside
   `skills/` on purpose: an agent using a skill must not be able to read the rubric it is graded on.
-- `docs/` — README translation and evaluation results.
+- `shared/` — the building blocks several skills use (transactions that survive a dead connection, a circuit
+  breaker, a promise deadline, worker loops). Skills ship separately, so each skill that imports one carries its
+  own copy: edit the file in `shared/`, run `npm run sync:shared`, and `npm run validate` checks the copies.
+- `docs/` — README translation, evaluation results, performance numbers, and
+  [architecture.md](../docs/architecture.md): when to use a class or a function, ports and adapters, and the
+  invariants every skill keeps.
 
 ## Before you open a pull request
 
 ```bash
-npm run validate      # SKILL.md frontmatter, links, eval sets
+npm run validate      # SKILL.md frontmatter, links, eval sets, shared-kernel copies
+npm run typecheck     # strict TypeScript over the reference code (Node only strips the types)
 npm run verify:up
 npm test
 npm run bench         # if you touched a hot path: compare with docs/performance.md
@@ -47,7 +53,8 @@ npm run bench         # if you touched a hot path: compare with docs/performance
 
 CI runs the same checks against Postgres and Redis service containers on every pull request.
 
-- **Found a bug in reference code?** Add a failing test to `verify/tests/latent-bugs.test.ts` first, then fix
+- **Found a bug in reference code?** Add a failing test first (the skill's own test file, or the current review
+  round's `verify/tests/latent-bugs-round<N>.test.ts`), then fix
   it and add the lesson to the skill's *Common mistakes*, so agents stop repeating it.
 
 ## Releasing

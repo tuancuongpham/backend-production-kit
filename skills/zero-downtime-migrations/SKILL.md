@@ -28,8 +28,9 @@ against traffic.
 
 1. **Lint every new migration in CI** with `lintMigration(sql)` from [references/lint.ts](references/lint.ts).
    - **Errors:** a non-concurrent `CREATE INDEX` on an existing table; a volatile default or serial column; a
-     foreign key or CHECK without `NOT VALID`; `UNIQUE` without `USING INDEX`; `VACUUM FULL`, `CLUSTER` or a
-     non-concurrent `REINDEX`; `CONCURRENTLY` inside a transaction.
+     `NOT NULL` column without a default (it fails outright on a table with rows); a foreign key or CHECK without
+     `NOT VALID`; `UNIQUE` without `USING INDEX`; `VACUUM FULL`, `CLUSTER` or a non-concurrent `REINDEX`;
+     `CONCURRENTLY` inside a transaction.
    - **Warnings** (need a human OK): type changes, `SET NOT NULL`, renames and drops, unbatched `UPDATE`/`DELETE`,
      `LOCK TABLE`.
    - Statements on a table created in the same migration are exempt.
@@ -42,7 +43,10 @@ against traffic.
    or type change via a new column, foreign keys and unique constraints, dropping columns, retrofitting tenant
    isolation (`multitenant-postgres`).
 4. **Backfill with `backfill()`.** It updates short batches walked by primary key, pauses between them, and resumes
-   from `lastId` or from `where new_col IS NULL`. Run long ones as a job (`job-queue`).
+   from `lastId` or from `where new_col IS NULL`. Run long ones as a job (`job-queue`). A batch that loses a
+   deadlock against the app, or hits a serialization failure or a lock timeout, is retried (`retries`, default 5).
+   If it still gives up, the error carries `lastId`: resume with `afterId: err.lastId`.
+   Copy `pg-transaction.ts` along with `migrate.ts`: it is the kit's shared transaction helper.
 5. **Check before shipping.**
    - Every new index has `pg_index.indisvalid = true`.
    - No migration holds an exclusive lock longer than a second on production-sized data. Restore a copy and time it.
@@ -65,6 +69,8 @@ Against real Postgres. [verify/tests/zero-downtime-migrations.test.ts](../../ver
   - `varchar → text`: no.
 - `backfill` updates in batches, and an interrupted run resumes with only the rows still to do.
 - The linter flags each hazard in a fixture migration and leaves the safe statements alone.
+- A batch that hits a deadlock is retried, and all 2,500 rows are backfilled; `ADD COLUMN … NOT NULL` without a
+  default is flagged, with a default it isn't ([latent-bugs-round3.test.ts](../../verify/tests/latent-bugs-round3.test.ts)).
 
 How to write these tests so they prove something:
 - Hold a lock from a second connection (an open transaction) and time a third query. A migration that runs fine on

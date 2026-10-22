@@ -40,11 +40,16 @@ auditInventory()       â†’ personal-looking columns that no one has classified â
 1. **Inventory.** Write the `InventoryEntry[]` from [references/erasure.ts](references/erasure.ts) for every table
    holding personal data: `subjectColumn`, `personal` columns, `onErase`, `anonymize` expressions, retention. Order
    children before parents: entries run in order inside one transaction.
+   - `createDataLifecycle` checks the inventory at startup (`checkInventory`) and refuses an unsafe one. An
+     `anonymize` entry must overwrite every `personal` column and the subject column, or the kept row still
+     identifies the person. Names must be plain identifiers, and retention needs a time column.
+   - Copy `pg-transaction.ts` along with `erasure.ts`: it is the kit's shared transaction helper.
 2. **Tables.** Add [references/erasure.sql](references/erasure.sql). The `erasure_requests` row records what was done
    per table and per store. Once every store is done it keeps only the hash.
 3. **Wire the request path.** "Delete my account" (after re-authentication) calls `requestErasure(userId)`, and the
    user is told the deadline. Schedule `processPending()` (a `job-queue` recurring job), and alert on requests close
-   to `due_at`.
+   to `due_at`. Any number of instances may run it: each request is leased to one run at a time (`leaseSec`, default
+   300 s, longer than the slowest store), and only that run writes the outcome back.
 4. **External stores.** Implement `erase(subjectId)` for each one:
    - Redis: SCAN + DEL by key pattern, which is why keys carry the user or tenant (`cache-stampede`);
    - the search index: delete by query;
@@ -73,6 +78,10 @@ Against real Postgres and Redis. [verify/tests/data-retention-and-erasure.test.t
 - An access request exports every inventoried row about the person.
 - Retention deletes 1,200 old chat messages in batches of 500, and keeps recent ones and tables without a window.
 - The audit flags `email`, `ho_ten` and `so_dien_thoai` on a new table, and passes once they're classified.
+- [latent-bugs-round3.test.ts](../../verify/tests/latent-bugs-round3.test.ts):
+  - two instances processing the same request at once can't reopen it with the subject already forgotten;
+  - `processPending` reports the requests it completed correctly when more than one batch is open;
+  - an `anonymize` entry that leaves `shipping_address` in place is refused at startup.
 
 How to write these tests so they prove something:
 - Prove absence by searching **every** text-like column for the person's identifiers, not only the tables you
@@ -92,4 +101,7 @@ stores and how each is erased, backup policy.
   record of what happened.
 - Forgetting derived data: embeddings of their questions, search index documents, analytics events, traces.
 - Keeping the subject's id in the erasure log forever. The log then re-identifies the person it was meant to forget.
+- Anonymizing some personal columns and forgetting one. The erasure "succeeds" and the address stays.
+- Letting two schedulers process the same request. The slower one wrote back "pending" after the faster one had
+  completed it and cleared the subject id, and the request then retried forever with nobody to erase.
 - No retention: data kept "just in case" is data you must find, export and erase later.

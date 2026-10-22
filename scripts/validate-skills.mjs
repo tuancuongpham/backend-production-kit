@@ -91,6 +91,22 @@ for (const name of skills) {
   if (existsSync(path.join('skills', name, 'evals'))) fail(`skills/${name}/evals: eval sets belong in evals/${name}/ (agents read skill folders)`);
 }
 
+// 4. The shared kernel (shared/*.ts) is vendored into the skills that import it: every copy must be identical,
+//    every import must have its copy, and no copy may linger unused. `npm run sync:shared` fixes all three.
+const sharedFiles = existsSync('shared') ? readdirSync('shared').filter((f) => f.endsWith('.ts')) : [];
+for (const name of skills) {
+  const dir = path.join('skills', name, 'references');
+  if (!existsSync(dir)) continue;
+  const sources = readdirSync(dir).filter((f) => f.endsWith('.ts') && !sharedFiles.includes(f)).map((f) => read(path.join(dir, f)));
+  for (const file of sharedFiles) {
+    const copy = path.join(dir, file);
+    const imported = sources.some((s) => s.includes(`'./${file}'`));
+    if (imported && !existsSync(copy)) fail(`${copy}: imported but missing (run npm run sync:shared)`);
+    else if (imported && read(copy) !== read(path.join('shared', file))) fail(`${copy}: differs from shared/${file} (edit shared/, then npm run sync:shared)`);
+    else if (!imported && existsSync(copy)) fail(`${copy}: no longer imported (run npm run sync:shared)`);
+  }
+}
+
 if (errors.length) {
   console.error(`✖ ${errors.length} problem(s):\n` + errors.map((e) => `  - ${e}`).join('\n'));
   process.exit(1);

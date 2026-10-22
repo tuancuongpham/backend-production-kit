@@ -30,10 +30,18 @@ Is every factual claim in the answer supported by the context? Numbers, dates, p
 appear in the context. An answer that says it doesn't know is supported.
 Reply with JSON only: {"verdict": "pass" | "fail", "reason": "<one sentence naming the unsupported claim, if any>"}`;
 
-export const fillPrompt = (c: JudgeCase) =>
-  GROUNDEDNESS_PROMPT.replace('{{context}}', c.context.map((t, i) => `[${i + 1}] ${t}`).join('\n'))
-    .replace('{{question}}', c.question)
-    .replace('{{answer}}', c.answer);
+/**
+ * One pass with a replacer function: text inserted for one placeholder is never scanned for the others (an answer
+ * that contains "{{context}}" stays as written), and `$&` or `$'` in it are not replacement patterns.
+ */
+export const fillPrompt = (c: JudgeCase) => {
+  const values: Record<string, string> = {
+    context: c.context.map((t, i) => `[${i + 1}] ${t}`).join('\n'),
+    question: c.question,
+    answer: c.answer,
+  };
+  return GROUNDEDNESS_PROMPT.replace(/\{\{(context|question|answer)\}\}/g, (_, name: string) => values[name]);
+};
 
 export async function runJudge(cases: JudgeCase[], judge: Judge) {
   const results: Array<JudgeCase & { verdict: Verdict; reason: string }> = [];

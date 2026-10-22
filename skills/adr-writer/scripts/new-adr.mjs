@@ -13,7 +13,13 @@ function parseArgs(argv) {
     const a = argv[i];
     if (a === '--dir') out.dir = argv[++i];
     else if (a === '--status') out.status = argv[++i];
-    else if (a === '--supersedes') out.supersedes = Number(argv[++i]);
+    else if (a === '--supersedes') {
+      out.supersedes = Number(argv[++i]);
+      if (!Number.isInteger(out.supersedes) || out.supersedes < 1) {
+        console.error(`--supersedes needs an ADR number, got "${argv[i]}"`);
+        process.exit(2);
+      }
+    }
     else out.title = out.title ? `${out.title} ${a}` : a;
   }
   if (!out.title) {
@@ -38,6 +44,14 @@ export function slugify(title) {
 
 const pad = (n) => String(n).padStart(4, '0');
 const ADR_FILE = /^(\d{4})-.+\.md$/;
+
+/**
+ * Fill {{NAME}} placeholders in one pass, with a replacer function: a title containing "$&" or "$'" stays as
+ * typed (string replacements treat those as patterns), and one containing "{{DATE}}" isn't filled in again.
+ */
+export function fillTemplate(template, values) {
+  return template.replace(/\{\{([A-Z]+)\}\}/g, (placeholder, name) => (Object.hasOwn(values, name) ? values[name] : placeholder));
+}
 
 async function listAdrs(dir) {
   const files = (await readdir(dir).catch(() => [])).filter((f) => ADR_FILE.test(f)).sort();
@@ -70,11 +84,7 @@ async function main() {
   const file = `${pad(number)}-${slugify(args.title) || 'decision'}.md`;
   const template = await readFile(path.join(here, '..', 'assets', 'adr-template.md'), 'utf8');
   const date = new Date().toISOString().slice(0, 10);
-  let content = template
-    .replaceAll('{{NUMBER}}', pad(number))
-    .replaceAll('{{TITLE}}', args.title)
-    .replaceAll('{{DATE}}', date)
-    .replaceAll('{{STATUS}}', args.status);
+  let content = fillTemplate(template, { NUMBER: pad(number), TITLE: args.title, DATE: date, STATUS: args.status });
 
   if (args.supersedes) {
     const old = existing.find((a) => a.number === args.supersedes);

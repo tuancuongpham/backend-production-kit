@@ -11,6 +11,8 @@ export interface Finding {
 
 const VOLATILE_DEFAULT = /\bDEFAULT\s+(?:random\(|clock_timestamp\(|timeofday\(|gen_random_uuid\(|uuid_generate_v[14]\(|nextval\()/i;
 const SERIAL_TYPE = /\bADD\s+(?:COLUMN\s+)?(?:IF\s+NOT\s+EXISTS\s+)?\S+\s+(?:big|small)?serial\b|\bGENERATED\s+(?:ALWAYS|BY\s+DEFAULT)\s+AS\s+(?:IDENTITY|\()/i;
+/** Each column definition of an ALTER TABLE … ADD [COLUMN], up to the next comma (not ADD CONSTRAINT and friends). */
+const ADD_COLUMN = /\bADD\s+(?:COLUMN\s+)?(?:IF\s+NOT\s+EXISTS\s+)?(?!CONSTRAINT\b|PRIMARY\b|UNIQUE\b|FOREIGN\b|CHECK\b|EXCLUDE\b)"?\w+"?\s+([^,]*)/gi;
 
 export function lintMigration(sql: string): Finding[] {
   const statements = splitStatements(sql);
@@ -41,6 +43,11 @@ export function lintMigration(sql: string): Finding[] {
     if (/^ALTER\s+TABLE/i.test(s) && !isNew) {
       if (/\bADD\s+(?:COLUMN\b)?/i.test(s) && (VOLATILE_DEFAULT.test(s) || SERIAL_TYPE.test(s))) {
         add('add-column-volatile-default', 'error', s, 'A volatile default (or serial/identity) rewrites the whole table under an ACCESS EXCLUSIVE lock. Add the column without it, backfill in batches, then set the default.');
+      }
+      for (const [, definition] of s.matchAll(ADD_COLUMN)) {
+        if (/\bNOT\s+NULL\b/i.test(definition) && !/\b(?:DEFAULT|GENERATED)\b/i.test(definition)) {
+          add('add-column-not-null', 'error', s, 'A NOT NULL column without a default fails on any table that has rows, and the deploy with it. Give it a constant DEFAULT (instant since PostgreSQL 11), or add it nullable, backfill, then SET NOT NULL through a validated CHECK.');
+        }
       }
       if (/\bALTER\s+(?:COLUMN\s+)?\S+\s+(?:SET\s+DATA\s+)?TYPE\b/i.test(s)) {
         add('alter-column-type', 'warning', s, 'Changing a column type usually rewrites the table and its indexes under an ACCESS EXCLUSIVE lock. Add a new column, backfill, switch reads, drop the old one.');

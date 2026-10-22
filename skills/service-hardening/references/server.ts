@@ -4,6 +4,7 @@
 // concerns below stay the same.
 import http from 'node:http';
 import { randomUUID } from 'node:crypto';
+import { withTimeout } from './with-timeout.ts';
 
 export interface RequestContext {
   /** Aborted when the client disconnects — pass it to DB queries, fetch, LLM calls. */
@@ -111,6 +112,10 @@ export function deadline(ms: number, parent?: AbortSignal): AbortSignal {
 
 const REQUEST_ID_RE = /^[A-Za-z0-9._-]{1,128}$/;
 
+/**
+ * A plain object of closures rather than a class instance: `shutdown` is meant to be handed to signal handlers and
+ * shutdown hooks (`installSignalHandlers(app.shutdown)`), where a detached class method would lose `this`.
+ */
 export function createHardenedServer(o: HardenedServerOptions) {
   const maxInFlight = o.maxInFlight ?? 256;
   const log = o.log ?? (() => {});
@@ -122,7 +127,7 @@ export function createHardenedServer(o: HardenedServerOptions) {
   async function ready(): Promise<boolean> {
     if (draining) return false;
     try {
-      await Promise.all((o.readinessChecks ?? []).map((check) => Promise.race([check(), sleep(1000).then(() => Promise.reject(new Error('readiness check timeout')))])));
+      await Promise.all((o.readinessChecks ?? []).map((check) => withTimeout(Promise.resolve().then(check), 1000, () => new Error('readiness check timeout'))));
       return true;
     } catch (e) {
       log('readiness check failed', { error: String(e) });

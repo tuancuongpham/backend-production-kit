@@ -63,8 +63,18 @@ export const defaultDetectors: Detector[] = [
 export const defaultSensitiveKeys =
   /^(pass(word)?|pwd|secret|.*_secret|token|.*_token|access_?token|refresh_?token|authorization|cookie|set-cookie|api_?key|x-api-key|cvv|cvc|otp|pin|private_?key)$/i;
 
+/**
+ * The redactor is a plain object of closures, not a class instance: its functions are meant to be passed around
+ * detached (`{ redact: redactor.redactString }`), which would lose `this` on a class method.
+ */
 export function createRedactor(opts: RedactorOptions = {}) {
   const detectors = opts.detectors ?? defaultDetectors;
+  for (const d of detectors) {
+    // replace() with a non-global pattern stops after the first match: the second email in a line would leak.
+    if (!d.pattern.global) throw new TypeError(`redactor: detector ${d.name}: pattern must be global (g flag), or only its first match per string is redacted`);
+    // test() on a g or y regex resumes at lastIndex: the hint would skip every other string.
+    if (d.hint && (d.hint.global || d.hint.sticky)) throw new TypeError(`redactor: detector ${d.name}: hint must not have the g or y flag`);
+  }
   const sensitiveKeys = opts.sensitiveKeys ?? defaultSensitiveKeys;
   const maxDepth = opts.maxDepth ?? 8;
   const maxLen = opts.maxStringLength ?? 16 * 1024;

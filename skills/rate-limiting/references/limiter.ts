@@ -6,6 +6,8 @@
 import { createHash } from 'node:crypto';
 import { readFileSync } from 'node:fs';
 import type { Redis } from 'ioredis';
+import { CircuitBreaker } from './circuit-breaker.ts';
+import { withTimeout } from './with-timeout.ts';
 
 const LUA = readFileSync(new URL('./token-bucket.lua', import.meta.url), 'utf8');
 // EVALSHA sends 40 bytes instead of the whole script on every request; Redis also skips re-hashing it.
@@ -28,11 +30,15 @@ export interface LimiterOptions {
   instances?: number;
   /** Hard cap on how long we wait for Redis per check. */
   timeoutMs?: number; // default 50
-  /** Consecutive Redis failures before we stop trying for `breakerCooldownMs`. */
+  /**
+   * Consecutive Redis failures before we stop trying for `breakerCooldownMs`; after it, one check probes Redis
+   * while the others keep using the failure mode.
+   */
   breakerThreshold?: number; // default 5
   breakerCooldownMs?: number; // default 5000
   keyPrefix?: string; // default 'rl'
   onRedisError?: (err: unknown) => void;
+  now?: () => number; // injectable for tests
 }
 
 export interface LimitResult {
@@ -42,18 +48,21 @@ export interface LimitResult {
   source: 'redis' | 'local' | 'fail-open' | 'fail-closed';
 }
 
+/** Per-instance token buckets for the 'local' failure mode, LRU-bounded. */
 class LocalBuckets {
-  #buckets = new Map<string, { tokens: number; ts: number }>();
-  #capacity: number;
-  #rate: number;
-  #maxKeys: number;
-  constructor(capacity: number, rate: number, maxKeys = 50_000) {
+  readonly #buckets = new Map<string, { tokens: number; ts: number }>();
+  readonly #capacity: number;
+  readonly #rate: number;
+  readonly #maxKeys: number;
+  readonly #now: () => number;
+  constructor(capacity: number, rate: number, now: () => number, maxKeys = 50_000) {
     this.#capacity = capacity;
     this.#rate = rate;
+    this.#now = now;
     this.#maxKeys = maxKeys;
   }
   take(key: string, cost: number): Omit<LimitResult, 'source'> {
-    const now = Date.now();
+    const now = this.#now();
     const b = this.#buckets.get(key) ?? { tokens: this.#capacity, ts: now };
     // Re-insert so Map order is least-recently-used first. With plain set() an existing key keeps its
     // original position, so the busiest (oldest) subject was evicted first and came back with a full bucket.
@@ -74,75 +83,84 @@ class LocalBuckets {
   }
 }
 
-export function createRateLimiter(o: LimiterOptions) {
-  // A bucket that never refills makes the script divide by zero and PEXPIRE "inf": every Redis call
-  // errors (allowed ones too) and the limiter silently runs in its failure mode. Refuse it up front.
-  if (!(o.capacity > 0) || !Number.isFinite(o.capacity)) throw new Error('rate limiter: capacity must be a positive number');
-  if (!(o.refillPerSec > 0) || !Number.isFinite(o.refillPerSec)) {
-    throw new Error('rate limiter: refillPerSec must be a positive number (for a fixed quota, use a tiny rate and a long-lived key)');
+export class RateLimiter {
+  readonly #redis: Redis;
+  readonly #capacity: number;
+  readonly #refillPerSec: number;
+  readonly #failureMode: FailureMode;
+  readonly #timeoutMs: number;
+  readonly #prefix: string;
+  readonly #onRedisError?: (err: unknown) => void;
+  readonly #breaker: CircuitBreaker;
+  readonly #local: LocalBuckets;
+  #redisCalls = 0;
+
+  constructor(o: LimiterOptions) {
+    // A bucket that never refills makes the script divide by zero and PEXPIRE "inf": every Redis call
+    // errors (allowed ones too) and the limiter silently runs in its failure mode. Refuse it up front.
+    if (!(o.capacity > 0) || !Number.isFinite(o.capacity)) throw new Error('rate limiter: capacity must be a positive number');
+    if (!(o.refillPerSec > 0) || !Number.isFinite(o.refillPerSec)) {
+      throw new Error('rate limiter: refillPerSec must be a positive number (for a fixed quota, use a tiny rate and a long-lived key)');
+    }
+    if (!['open', 'closed', 'local'].includes(o.failureMode)) throw new Error(`rate limiter: unknown failureMode "${o.failureMode}"`);
+    const now = o.now ?? Date.now;
+    const instances = Math.max(1, o.instances ?? 1);
+    this.#redis = o.redis;
+    this.#capacity = o.capacity;
+    this.#refillPerSec = o.refillPerSec;
+    this.#failureMode = o.failureMode;
+    this.#timeoutMs = o.timeoutMs ?? 50;
+    this.#prefix = o.keyPrefix ?? 'rl';
+    this.#onRedisError = o.onRedisError;
+    this.#breaker = new CircuitBreaker({ threshold: o.breakerThreshold ?? 5, cooldownMs: o.breakerCooldownMs ?? 5000, now });
+    this.#local = new LocalBuckets(Math.max(1, Math.floor(o.capacity / instances)), o.refillPerSec / instances, now);
   }
-  const timeoutMs = o.timeoutMs ?? 50;
-  const threshold = o.breakerThreshold ?? 5;
-  const cooldown = o.breakerCooldownMs ?? 5000;
-  const prefix = o.keyPrefix ?? 'rl';
-  const instances = Math.max(1, o.instances ?? 1);
-  const local = new LocalBuckets(Math.max(1, Math.floor(o.capacity / instances)), o.refillPerSec / instances);
 
-  let failures = 0;
-  let openUntil = 0;
-  let redisCalls = 0;
+  /** `subject` is e.g. `tenant:42:route:/v1/chat`. Use a hash tag `{...}` around it on Redis Cluster. */
+  async check(subject: string, cost = 1): Promise<LimitResult> {
+    // A negative cost would add tokens; one above capacity could never pass and only ever earns a 429.
+    if (!(cost > 0) || !Number.isFinite(cost) || cost > this.#capacity) throw new RangeError(`rate limiter: cost must be in (0, capacity], got ${cost}`);
+    const key = `${this.#prefix}:{${subject}}`;
+    if (!this.#breaker.tryAcquire()) return this.#fallback(key, cost); // open: don't wait on a dead Redis
+    try {
+      const [allowed, remaining, retryAfterMs] = await this.#callRedis(key, cost);
+      this.#breaker.success();
+      return { allowed: allowed === 1, remaining, retryAfterMs, source: 'redis' };
+    } catch (err) {
+      this.#onRedisError?.(err);
+      this.#breaker.failure();
+      return this.#fallback(key, cost);
+    }
+  }
 
-  function fallback(key: string, cost: number): LimitResult {
-    switch (o.failureMode) {
+  stats() {
+    return { redisCalls: this.#redisCalls, breakerOpen: this.#breaker.state === 'open' };
+  }
+
+  #fallback(key: string, cost: number): LimitResult {
+    switch (this.#failureMode) {
       case 'open':
         return { allowed: true, remaining: 0, retryAfterMs: 0, source: 'fail-open' };
       case 'closed':
         return { allowed: false, remaining: 0, retryAfterMs: 1000, source: 'fail-closed' };
       case 'local':
-        return { ...local.take(key, cost), source: 'local' };
+        return { ...this.#local.take(key, cost), source: 'local' };
     }
   }
 
-  async function callRedis(key: string, cost: number): Promise<[number, number, number]> {
-    redisCalls++;
-    let timer: NodeJS.Timeout | undefined;
-    const timeout = new Promise<never>((_, reject) => {
-      timer = setTimeout(() => reject(new Error(`rate limiter: redis timeout after ${timeoutMs}ms`)), timeoutMs);
+  #callRedis(key: string, cost: number): Promise<[number, number, number]> {
+    this.#redisCalls++;
+    const args = [key, this.#capacity, this.#refillPerSec, cost] as const;
+    const call = (this.#redis.evalsha(LUA_SHA, 1, ...args) as Promise<[number, number, number]>).catch((err: Error) => {
+      // First call on this Redis (or after SCRIPT FLUSH / failover): load it once, then it's cached.
+      if (!String(err?.message).startsWith('NOSCRIPT')) throw err;
+      return this.#redis.eval(LUA, 1, ...args) as Promise<[number, number, number]>;
     });
-    try {
-      const call = (o.redis.evalsha(LUA_SHA, 1, key, o.capacity, o.refillPerSec, cost) as Promise<[number, number, number]>).catch(
-        (err: Error) => {
-          // First call on this Redis (or after SCRIPT FLUSH / failover): load it once, then it's cached.
-          if (!String(err?.message).startsWith('NOSCRIPT')) throw err;
-          return o.redis.eval(LUA, 1, key, o.capacity, o.refillPerSec, cost) as Promise<[number, number, number]>;
-        },
-      );
-      // If the timeout wins, the Redis call may still reject later: swallow it, or Node
-      // treats it as an unhandled rejection and kills the process.
-      call.catch(() => {});
-      return await Promise.race([call, timeout]);
-    } finally {
-      clearTimeout(timer);
-    }
+    return withTimeout(call, this.#timeoutMs, () => new Error(`rate limiter: redis timeout after ${this.#timeoutMs}ms`));
   }
-
-  /** `subject` is e.g. `tenant:42:route:/v1/chat`. Use a hash tag `{...}` around it on Redis Cluster. */
-  async function check(subject: string, cost = 1): Promise<LimitResult> {
-    const key = `${prefix}:{${subject}}`;
-    if (Date.now() < openUntil) return fallback(key, cost); // breaker open: don't wait on a dead Redis
-    try {
-      const [allowed, remaining, retryAfterMs] = await callRedis(key, cost);
-      failures = 0;
-      return { allowed: allowed === 1, remaining, retryAfterMs, source: 'redis' };
-    } catch (err) {
-      o.onRedisError?.(err);
-      if (++failures >= threshold) openUntil = Date.now() + cooldown;
-      return fallback(key, cost);
-    }
-  }
-
-  return { check, stats: () => ({ redisCalls, breakerOpen: Date.now() < openUntil }) };
 }
+
+export const createRateLimiter = (o: LimiterOptions) => new RateLimiter(o);
 
 /** Standard response headers. Always send Retry-After with 429 so well-behaved clients back off. */
 export function rateLimitHeaders(r: LimitResult, capacity: number): Record<string, string> {

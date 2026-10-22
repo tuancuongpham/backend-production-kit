@@ -27,8 +27,19 @@ CREATE TABLE IF NOT EXISTS tool_results (
   args_hash    text NOT NULL,
   status       text NOT NULL CHECK (status IN ('running', 'done')),
   result       jsonb,
-  created_at   timestamptz NOT NULL DEFAULT now(),
+  claim_token  uuid,                   -- new on every claim: only its holder may finish or release it
+  created_at   timestamptz NOT NULL DEFAULT now(), -- claimed (or taken over) at
   PRIMARY KEY (tenant_id, tool_call_id)
+);
+ALTER TABLE tool_results ADD COLUMN IF NOT EXISTS claim_token uuid; -- upgrade from 0.4.0
+
+-- Sessions whose context has taken in untrusted content. In the database, not in process memory: the agent's next
+-- turn is another request, possibly on another instance, and the content is still in its context.
+CREATE TABLE IF NOT EXISTS tool_sessions (
+  tenant_id    text NOT NULL,
+  session_id   text NOT NULL,
+  untrusted_at timestamptz NOT NULL DEFAULT now(),
+  PRIMARY KEY (tenant_id, session_id)
 );
 
 -- Every call, allowed or not: who, what, under which approval, with which outcome.

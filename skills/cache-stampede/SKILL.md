@@ -46,6 +46,13 @@ get(key, load)
    - A stale value is served while one instance refreshes it. If the refresh fails, the stale value keeps being
      served until `staleSec` runs out; then the error surfaces.
    - TTLs get up to 10% jitter, so keys written together don't expire together.
+   - **A hit returns exactly what a miss returned.** Every value goes through the codec (JSON by default) on the way
+     out too, so a `Date` is an ISO string on a miss as well as on a hit. Code that passed its tests on misses would
+     otherwise break on hits in production. For richer types, pass `codec` (superjson, msgpack). A value the codec
+     can't encode (a `BigInt` in JSON) is served uncached and reported, not failed.
+   - Redis calls go through a circuit breaker: after 3 failures in a row the cache stops asking for a second, then
+     one probe decides. A black-holed Redis then costs nothing per request instead of `timeoutMs` each.
+   - Copy `circuit-breaker.ts` and `with-timeout.ts` along with `cache.ts`: they are the kit's shared building blocks.
 3. **Writes.** Run `invalidate(key)` after the transaction commits. For data changed by other services, publish
    the change through the outbox (`outbox-pattern`) and invalidate in its consumer.
 4. **Metrics.** Track hits (fresh and stale), misses, origin loads per key family, lock waits that fell back to
@@ -63,6 +70,9 @@ Against real Redis. [verify/tests/cache-stampede.test.ts](../../verify/tests/cac
 - An instance that died holding the lock blocks the others for `waitMs` only.
 - Redis down → requests reach the origin, still one call per key per process, and the outage is reported.
 - Jittered TTLs are spread over more than a second; `null` results are cached; keys carry the tenant.
+- [latent-bugs-round3.test.ts](../../verify/tests/latent-bugs-round3.test.ts): a hit deep-equals the miss that filled
+  it (a `Date` field included); a `BigInt` value is served uncached; 20 requests against a black-holed Redis take
+  181 ms in total, against 1,236 ms without the breaker.
 
 How to write these tests so they prove something:
 - Fire the requests concurrently against an origin that takes long enough to overlap them, and count origin calls.
@@ -85,3 +95,5 @@ ADR: staleness allowed per key family, invalidation path, key format and version
 - Invalidating before the commit, or only in the instance that made the change.
 - Cache keys without the tenant (or user) when the value depends on who asks.
 - Letting a Redis outage take the site down with it: no timeout, an offline queue, no fallback to the origin.
+- Returning the loaded value on a miss and the decoded one on a hit. Dates, Maps and class instances change type
+  between the first request and the second.

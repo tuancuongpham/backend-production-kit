@@ -1,0 +1,21 @@
+{
+  // Type-checks the code the skills ship (`npm run typecheck`). Node runs it by stripping types, without checking
+  // them, so this is the only place a type error shows up. erasableSyntaxOnly rejects what Node can't strip:
+  // enums, namespaces, parameter properties.
+  "compilerOptions": {
+    "target": "es2023",
+    "lib": ["es2024"],
+    "module": "nodenext",
+    "moduleResolution": "nodenext",
+    "types": ["node"],
+    "strict": true,
+    "noEmit": true,
+    "skipLibCheck": true,
+    "allowImportingTsExtensions": true,
+    "erasableSyntaxOnly": true,
+    "verbatimModuleSyntax": true
+  },
+  "include": ["skills/*/references/*.ts", "shared/*.ts"],
+  // Imports the OpenTelemetry SDK packages, which the kit doesn't install (it isn't run by verify/ either).
+  "exclude": ["skills/llm-observability/references/otel-setup.ts"]
+}

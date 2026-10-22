@@ -73,6 +73,9 @@ jobs:
       - name: Install dependencies
         run: npm ci
 
+      - name: Type-check the reference code (Node strips types without checking them)
+        run: npm run typecheck
+
       - name: Verification tests (real Postgres + Redis)
         run: npm test
 

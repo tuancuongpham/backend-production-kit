@@ -27,12 +27,17 @@ LLM APIs are the most expensive and least reliable dependency most apps have. Th
    - **Exact cache** on `sha256(scope, messages, params)`. For "summarize X" features this also means *unchanged input is never re-summarized*. That is often the single biggest saving, and a frequent cause of a sudden 3× bill (re-summarizing on every view).
    - **Semantic cache**:
      - only for single-question requests, because in multi-turn chats the history changes the meaning;
-     - `semanticMode` defaults to **`'shadow'`**: look up, report would-be hits through `onShadowHit` (question, cached question, similarity) for labelling, but still call the model. Switch to `'serve'` only after the eval below passes;
+     - `semanticMode` defaults to **`'shadow'`**: look up, report would-be hits through `onShadowHit` (question, cached question, similarity) for labelling, but still call the model. Switch to `'serve'` only after the eval below passes. In shadow mode the embedding and lookup run beside the model call, so they add no latency (a 100 ms embedding with a 100 ms model: 108 ms per request instead of 206 ms);
      - an optional extra guard is to reject hits whose negation words or numbers differ from the cached question. It is a heuristic, and it doesn't replace the eval.
    - **Budget, reserve then settle**: before calling a provider, atomically reserve a *pessimistic* cost estimate (`spent + reserved + estimate ≤ limit`, else `BudgetExceededError` with no provider call). Settle with the real cost afterwards; a failed call releases the reservation. A read-then-call check lets N concurrent requests all pass and overshoot by N × cost. Over-estimating is safe; under-estimating lets concurrency overshoot.
-   - **Provider chain**: per-attempt timeout; fall back on 408/409/429/5xx/timeout. Don't fall back on 4xx (our bug, same everywhere). A circuit breaker per provider skips a failing vendor. Caller cancellation (`signal`) stops the chain.
+   - **Provider chain**: per-attempt timeout; fall back on 408/409/429/5xx/timeout. Don't fall back on 4xx (our bug, same everywhere). Caller cancellation (`signal`) stops the chain, and a request already cancelled is never sent.
+     - A circuit breaker per provider skips a failing vendor. After its cooldown it lets **one probe** through while the other requests go straight to the fallback; without that half-open state, every request waiting at that moment calls the dead vendor and waits out its timeout.
+     - Answers from a fallback provider are cached for `fallbackCacheTtlSec` (default 300 s), not the full TTL: they shouldn't outlive the outage.
+   - **Once the model has answered, nothing can fail the request or buy the answer again.** Settling the budget and writing the caches come after the answer and are best effort: their errors go to `onError(err, stage)`, never to the fallback provider.
+   - **Optional infrastructure fails open**: a cache store or embedding API that is down means no cache for that request, not a failed request. The budget store is a control and fails closed: if the reservation can't be made, the request fails.
    - **Cost** comes from a price table **in config**. Prices change; a missing price shows up as cost 0 and should alert.
-   - **Accounting never fails a request**: `onUsage` errors, sync or async, are caught and passed to `onUsageError`.
+   - **Accounting never fails a request**: `onUsage` errors, sync or async, are caught and passed to `onUsageError` (or `onError`).
+   - Copy `circuit-breaker.ts` and `pg-transaction.ts` along with the gateway files: they are the kit's shared building blocks, identical in every skill that has them.
 2. **Stores**: [references/semantic-cache.sql](references/semantic-cache.sql) + [references/pg-stores.ts](references/pg-stores.ts):
    - Postgres/pgvector exact and semantic caches (Redis is a fine alternative for the exact cache);
    - the semantic lookup searches **only the caller's scope, exactly**, by default (`pgCache(pool)`). Measured p50 is 0.3 ms at 120 entries per scope, 1.5 ms at 1,000 and 9 ms at 5,000;
@@ -40,7 +45,7 @@ LLM APIs are the most expensive and least reliable dependency most apps have. Th
    - **never a plain HNSW index plus `WHERE scope = …`**. The index hands back its 40 nearest rows across *all* tenants and the filter runs afterwards. A question that many tenants cached crowds out this tenant's own copy: 4 hits out of 20 in the benchmark, each miss a full-price model call;
    - embeddings travel as binary parameters (`vectorParam`): 6 KB instead of ~32 KB of text, and lookups and saves about 3× faster. The schema also keeps vectors inside the row (`SET STORAGE MAIN`), which makes exact search 2–3× faster;
    - the `llm_budget` counters: one conditional upsert per reservation, atomic across instances;
-   - the `llm_usage` ledger for reports. Reconcile `llm_budget` against the `llm_monthly_spend` view daily, since they drift if a usage write is lost;
+   - the `llm_usage` ledger for reports, written by `pgUsageSink(pool)` as the gateway's `onUsage`. A failed write reaches `onUsageError`; alert on it. Reconcile `llm_budget` against the `llm_monthly_spend` view daily, since they drift if a usage write or a settlement is lost;
    - `pruneLlmCache(pool)` on a schedule. Expired rows are never read again, and without it both cache tables grow forever.
 3. **Providers**: wrap each SDK call in the `Provider` interface and map its errors to `ProviderError(status)`. With an upstream gateway (LiteLLM / Vercel AI Gateway), the "provider" is that gateway, and you can lean on its fallback instead.
 4. **Streaming**: stream tokens to the client (see `sse-streaming`). Write the cache entry and usage row when the stream completes, and replay cached answers as a stream so the UX is identical.
@@ -67,6 +72,8 @@ LLM APIs are the most expensive and least reliable dependency most apps have. Th
   - a failed call releases its reservation;
   - cache hits are still served when out of budget.
 - **Accounting**: a usage sink that throws or rejects doesn't fail the request.
+- **Failures after the answer** ([latent-bugs-round3.test.ts](../../verify/tests/latent-bugs-round3.test.ts)): a cache store that fails to write, or a budget store that fails to settle, after the primary answered → the answer is returned, and the fallback is never called. A cache store that is down → the request is still answered.
+- **Breaker half-open**: after the cooldown, 10 waiting requests send 1 probe to the dead provider, not 10. A fallback answer cached during an outage is gone 10 minutes later. An already cancelled request never reaches a provider.
 - **Postgres stores**: TTL expiry, similarity threshold, scope isolation.
 - **Many tenants, same question** ([latent-bugs-round2.test.ts](../../verify/tests/latent-bugs-round2.test.ts)): 100 tenants cache a popular question, and this tenant's own entry is still found with an HNSW index present. `pruneLlmCache` removes only expired rows.
 
@@ -81,6 +88,8 @@ ADR: build vs buy, fallback chain and its quality trade-off, semantic cache thre
 - A cache key without the tenant: one customer's answer is served to another.
 - Caching `temperature > 0` or tool-calling responses: stale or wrong actions get replayed.
 - Retrying 429s immediately across providers with no breaker: a vendor incident becomes your outage and your bill.
+- A breaker with no half-open state: when the cooldown ends, every waiting request calls the vendor that is still down.
+- One try/catch around "call the model, then cache and settle". A cache or ledger error after the model answered looked like a provider failure: the gateway bought the answer again from the fallback, counted a failure against the healthy provider, and left the budget reservation stuck.
 - Prices hardcoded next to business logic: wrong costs for months after a price change.
 - Writing usage synchronously and failing the request when the ledger write fails.
 - Checking the budget with a read (`SELECT sum(cost)`) and then calling: under load, every in-flight request passes the check.

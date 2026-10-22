@@ -1,6 +1,7 @@
 // Postgres implementations of the gateway's CacheStore / BudgetStore / usage sink.
 import type pg from 'pg';
 import type { BudgetStore, CacheStore, CachedResponse, UsageRecord } from './gateway.ts';
+import { withTransaction } from './pg-transaction.ts';
 
 /**
  * Embedding as a binary query parameter. node-postgres sends Buffers in binary format and pgvector reads
@@ -63,23 +64,15 @@ export function pgCache(pool: pg.Pool, opts: PgCacheOptions = {}): CacheStore {
         );
         r = rows[0];
       } else {
-        const client = await pool.connect();
-        // pg emits 'error' on a checked-out client whose connection dies between queries (failover);
-        // unheard, that crashes the process instead of failing this lookup.
-        let lost: Error | undefined;
-        const onLost = (err: Error) => {
-          lost = err;
-        };
-        client.on('error', onLost);
-        try {
-          await client.query('BEGIN');
-          // Keep walking the HNSW graph until a row of this scope turns up (pgvector >= 0.8).
-          await client.query(
+        r = await withTransaction(pool, async (tx) => {
+          // Keep walking the HNSW graph until a row of this scope turns up (pgvector >= 0.8). SET LOCAL needs the
+          // transaction; the vector cast loads the library first, so pg_settings knows the parameter.
+          await tx.query(
             `SELECT '[0]'::vector;
              SELECT set_config('hnsw.iterative_scan', 'relaxed_order', true)
              WHERE EXISTS (SELECT 1 FROM pg_settings WHERE name = 'hnsw.iterative_scan')`,
           );
-          const { rows } = await client.query(
+          const { rows } = await tx.query(
             `SELECT value, 1 - (embedding <=> $2::vector) AS similarity
              FROM llm_semantic_cache
              WHERE scope = $1 AND expires_at > now()
@@ -87,15 +80,8 @@ export function pgCache(pool: pg.Pool, opts: PgCacheOptions = {}): CacheStore {
              LIMIT 1`,
             [scope, probe],
           );
-          await client.query('COMMIT');
-          r = rows[0];
-        } catch (e) {
-          await client.query('ROLLBACK').catch(() => {});
-          throw e;
-        } finally {
-          client.off('error', onLost);
-          client.release(lost);
-        }
+          return rows[0];
+        });
       }
       return r && r.similarity >= minSimilarity ? { value: r.value as CachedResponse, similarity: Number(r.similarity) } : null;
     },
@@ -155,15 +141,19 @@ export async function pruneLlmCache(pool: pg.Pool, batchSize = 5000) {
   };
 }
 
+/**
+ * The gateway's `onUsage`. A failed write rejects, and the gateway hands it to onUsageError (or onError): it never
+ * reaches the user's request, and it isn't hidden in console output either. Alert on it: a missing row is spend
+ * the FinOps reports don't see.
+ */
 export function pgUsageSink(pool: pg.Pool, traceId?: () => string | undefined) {
-  return (u: UsageRecord) =>
-    pool
-      .query(
-        `INSERT INTO llm_usage (tenant_id, user_id, feature, trace_id, provider, model, cache,
-           input_tokens, output_tokens, cost_usd, latency_ms, fallback_from, ok, error)
-         VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14)`,
-        [u.tenantId, u.userId ?? null, u.feature ?? null, traceId?.() ?? null, u.provider, u.model, u.cache,
-          u.inputTokens, u.outputTokens, u.costUsd, Math.round(u.latencyMs), u.fallbackFrom, u.ok, u.error ?? null],
-      )
-      .catch((e) => console.error('llm usage write failed', e)); // never fail the user request on accounting
+  return async (u: UsageRecord): Promise<void> => {
+    await pool.query(
+      `INSERT INTO llm_usage (tenant_id, user_id, feature, trace_id, provider, model, cache,
+         input_tokens, output_tokens, cost_usd, latency_ms, fallback_from, ok, error)
+       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14)`,
+      [u.tenantId, u.userId ?? null, u.feature ?? null, traceId?.() ?? null, u.provider, u.model, u.cache,
+        u.inputTokens, u.outputTokens, u.costUsd, Math.round(u.latencyMs), u.fallbackFrom, u.ok, u.error ?? null],
+    );
+  };
 }

@@ -31,6 +31,7 @@ Use two mechanisms together:
    - **Traces**: redact attributes when you set them (the `llm-observability` helpers take a redactor), or add a redaction/transform processor in the OTel Collector. Span attributes are immutable after end, so redacting in an exporter is awkward.
    - **Audit logs**: keep actor ids and actions, redact free text.
 3. **Seed the fixture table** with the formats your users actually type: with/without separators, `+84`, emails with `+tag`, cards with spaces. Add false-positive guards too: order ids, timestamps, trace ids, version numbers.
+   Custom detectors are checked when the redactor is created: the `pattern` must be global (without `g`, `replace` stops after the first match and the second email in a line leaks), and a `hint` must not be (`test()` on a global regex resumes at `lastIndex` and skips every other string).
 4. Add a **CI guard**: one test that runs a realistic log line through the configured logger (not just the redactor) and asserts no raw value appears in the output.
 
 ## Verification (required)
@@ -40,6 +41,7 @@ Use two mechanisms together:
 - Sensitive keys are replaced at any depth; arrays, `Error` objects (message **and** stack), cycles and deep nesting are handled without throwing; input objects are not mutated.
 - HMAC placeholders are stable for the same value and differ for different values.
 - The real logger configuration (pino hooks) redacts both merged objects and message strings.
+- A custom detector without the `g` flag, or a hint with it, is refused at startup ([latent-bugs-round3.test.ts](../../verify/tests/latent-bugs-round3.test.ts)).
 - **End-to-end**: trigger an error in a request containing an email and a card number, then grep the captured log output and the error-tracker payload. Neither raw value should be present.
 
 ## Record the decision

@@ -1,6 +1,9 @@
 // Transactional outbox: write the event in the SAME transaction as the state change,
 // publish it later from a relay, dedup on the consumer side.
 import type pg from 'pg';
+import { withTransaction } from './pg-transaction.ts';
+import { withTimeout } from './with-timeout.ts';
+import { runLoops } from './worker-loop.ts';
 
 export interface OutboxEvent {
   aggregateType: string;
@@ -49,62 +52,60 @@ export interface RelayOptions {
   publishTimeoutMs?: number;
 }
 
+export interface RelayRunOptions {
+  /** Abort to stop; run() resolves once the batch in flight is done. */
+  signal: AbortSignal;
+  /** Pause when the outbox is empty, another instance holds the relay lock, or a run failed (default 1000 ms). */
+  idleMs?: number;
+  onError?: (err: unknown) => void;
+}
+
 // Arbitrary constant; one relay holds it at a time.
 const RELAY_LOCK_KEY = 0x6f7574626f78; // "outbox"
 
-export function createRelay(o: RelayOptions) {
-  const publishTimeoutMs = o.publishTimeoutMs ?? 10_000;
+/**
+ * Publishes pending messages in commit order. A transaction-scoped advisory lock makes the relay single-active
+ * across instances, which is what preserves ordering (with competing relays, message 2 could overtake message 1),
+ * and the relay stops at the first failure for the same reason.
+ */
+export class OutboxRelay {
+  readonly #pool: pg.Pool;
+  readonly #publish: Publish;
+  readonly #batchSize: number;
+  readonly #publishTimeoutMs: number;
 
-  async function publishWithTimeout(msg: OutboxMessage): Promise<void> {
-    let timer: NodeJS.Timeout | undefined;
-    const call = Promise.resolve().then(() => o.publish(msg)); // a synchronous throw becomes a rejection
-    call.catch(() => {}); // the race loser may reject later
-    const timeout = new Promise<never>((_, reject) => {
-      timer = setTimeout(() => reject(new Error(`publish timeout after ${publishTimeoutMs} ms`)), publishTimeoutMs);
-    });
-    try {
-      await Promise.race([call, timeout]);
-    } finally {
-      clearTimeout(timer);
-    }
+  constructor(o: RelayOptions) {
+    if (typeof o.publish !== 'function') throw new TypeError('outbox relay: publish must be a function');
+    this.#pool = o.pool;
+    this.#publish = o.publish;
+    this.#batchSize = o.batchSize ?? 100;
+    this.#publishTimeoutMs = o.publishTimeoutMs ?? 10_000;
+    if (!Number.isInteger(this.#batchSize) || this.#batchSize < 1) throw new RangeError('outbox relay: batchSize must be a positive integer');
+    if (!(this.#publishTimeoutMs > 0)) throw new RangeError('outbox relay: publishTimeoutMs must be positive');
   }
 
-  /**
-   * Publishes pending messages in commit order. A transaction-scoped advisory lock makes this
-   * single-active across instances, which is what preserves ordering (with competing relays,
-   * message 2 could overtake message 1). Stops at the first failure for the same reason.
-   * Returns the number published; 0 also when another relay holds the lock.
-   */
-  async function relayOnce(): Promise<number> {
-    const client = await o.pool.connect();
-    // pg emits 'error' on a checked-out client whose connection dies between queries: here, while a slow
-    // publish runs and idle_in_transaction_session_timeout or a failover ends the session. Unheard, that
-    // crashes the process; heard, this run fails, the batch is re-published next time, consumers dedup.
-    let lost: Error | undefined;
-    const onLost = (err: Error) => {
-      lost = err;
-    };
-    client.on('error', onLost);
-    try {
-      await client.query('BEGIN');
-      const lock = await client.query(`SELECT pg_try_advisory_xact_lock($1) AS ok`, [RELAY_LOCK_KEY]);
-      if (!lock.rows[0].ok) {
-        await client.query('COMMIT');
-        return 0;
-      }
-      const { rows } = await client.query<OutboxMessage>(
+  /** One batch. Returns the number published; 0 also when another relay holds the lock. */
+  relayOnce(): Promise<number> {
+    return withTransaction(this.#pool, async (tx, lost) => {
+      const lock = await tx.query(`SELECT pg_try_advisory_xact_lock($1) AS ok`, [RELAY_LOCK_KEY]);
+      if (!lock.rows[0].ok) return 0;
+      const { rows } = await tx.query<OutboxMessage>(
         `SELECT id, aggregate_type, aggregate_id, event_type, payload, headers
          FROM outbox WHERE published_at IS NULL ORDER BY seq LIMIT $1`,
-        [o.batchSize ?? 100],
+        [this.#batchSize],
       );
       const published: string[] = [];
       let failure: { id: string; error: string } | undefined;
       for (const msg of rows) {
-        // The connection died while we were publishing: stop now. The marks can't commit anyway, and every
-        // further publish would only be sent again on the next run.
-        if (lost) throw lost;
+        // The connection died while we were publishing (failover, idle_in_transaction_session_timeout): stop now.
+        // The marks can't commit anyway, and every further publish would only be sent again on the next run.
+        if (lost.aborted) throw lost.reason;
         try {
-          await publishWithTimeout(msg);
+          await withTimeout(
+            Promise.resolve().then(() => this.#publish(msg)), // a synchronous throw becomes a rejection
+            this.#publishTimeoutMs,
+            () => new Error(`publish timeout after ${this.#publishTimeoutMs} ms`),
+          );
         } catch (err) {
           failure = { id: msg.id, error: String(err instanceof Error ? err.message : err).slice(0, 2000) };
           break; // keep order: retry this message first next time
@@ -115,62 +116,43 @@ export function createRelay(o: RelayOptions) {
       // Same crash behaviour as before: marks only become durable at COMMIT either way, so a crash
       // mid-batch re-publishes the batch and consumers dedup by message id.
       if (published.length) {
-        await client.query(`UPDATE outbox SET published_at = now(), last_error = NULL WHERE id = ANY($1::uuid[])`, [published]);
+        await tx.query(`UPDATE outbox SET published_at = now(), last_error = NULL WHERE id = ANY($1::uuid[])`, [published]);
       }
       if (failure) {
-        await client.query(`UPDATE outbox SET attempts = attempts + 1, last_error = $2 WHERE id = $1`, [failure.id, failure.error]);
+        await tx.query(`UPDATE outbox SET attempts = attempts + 1, last_error = $2 WHERE id = $1`, [failure.id, failure.error]);
       }
-      await client.query('COMMIT');
       return published.length;
-    } catch (e) {
-      await client.query('ROLLBACK').catch(() => {});
-      throw e;
-    } finally {
-      client.off('error', onLost);
-      client.release(lost);
-    }
+    });
   }
 
-  return { relayOnce };
+  /**
+   * The relay process: batches back to back while there is a backlog, a pause of `idleMs` when there is none.
+   * For lower latency, also call relayOnce() from a LISTEN outbox handler (outbox.sql has the NOTIFY trigger).
+   */
+  run(r: RelayRunOptions): Promise<void> {
+    return runLoops({ tick: async () => (await this.relayOnce()) > 0, signal: r.signal, idleMs: r.idleMs, onError: r.onError });
+  }
 }
+
+export const createRelay = (o: RelayOptions) => new OutboxRelay(o);
 
 /**
  * Consumer side: apply a message at most once per consumer. The dedup row and the side effects
  * share a transaction, so a crash either applies both or neither. Duplicates from relay retries
  * or broker redelivery return 'duplicate' — ack them.
  */
-export async function consumeOnce(
+export function consumeOnce(
   pool: pg.Pool,
   consumer: string,
   messageId: string,
   apply: (tx: pg.PoolClient) => Promise<void>,
 ): Promise<'applied' | 'duplicate'> {
-  const client = await pool.connect();
-  let lost: Error | undefined; // as in relayOnce: a connection dying mid-apply fails this call, not the process
-  const onLost = (err: Error) => {
-    lost = err;
-  };
-  client.on('error', onLost);
-  try {
-    await client.query('BEGIN');
-    const ins = await client.query(
-      `INSERT INTO processed_messages (consumer, message_id) VALUES ($1, $2) ON CONFLICT DO NOTHING`,
-      [consumer, messageId],
-    );
-    if (ins.rowCount === 0) {
-      await client.query('COMMIT');
-      return 'duplicate';
-    }
-    await apply(client);
-    await client.query('COMMIT');
+  return withTransaction(pool, async (tx) => {
+    const ins = await tx.query(`INSERT INTO processed_messages (consumer, message_id) VALUES ($1, $2) ON CONFLICT DO NOTHING`, [consumer, messageId]);
+    if (ins.rowCount === 0) return 'duplicate';
+    await apply(tx);
     return 'applied';
-  } catch (e) {
-    await client.query('ROLLBACK').catch(() => {});
-    throw e;
-  } finally {
-    client.off('error', onLost);
-    client.release(lost);
-  }
+  });
 }
 
 /** Housekeeping: published rows are only needed for debugging/replay for a while. */

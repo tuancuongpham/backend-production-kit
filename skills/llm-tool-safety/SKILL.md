@@ -35,23 +35,31 @@ every call → audit (tenant, user, tool, tier, outcome, approval, tainted?)
 ## Implementation steps
 
 1. **Tables.** Add [references/tool-guard.sql](references/tool-guard.sql): `tool_approvals`, `tool_results` (run
-   once by tool-call id) and `tool_audit`.
+   once by tool-call id), `tool_audit`, and `tool_sessions` (which conversations are tainted).
 2. **Define tools** with [references/tool-guard.ts](references/tool-guard.ts): `{ name, tier, params, run }`.
    - `params` is strict: types, `min`/`max`, `pattern`, `maxLength`, `enum`. Unknown or missing arguments are
      rejected before `run`.
    - Mark tools whose output comes from outside with `returnsUntrusted: true` (search, read mail, fetch URL).
    - Inside `run`, scope every query by `ctx.tenantId`, ideally through `withTenant` (`multitenant-postgres`).
-3. **One guard session per agent conversation.** `guard.session({ tenantId, userId, sessionId })`, then
+3. **One guard session per agent conversation.** Create one guard per app (`createToolGuard({ pool, tools })`), and per
+   request `guard.session({ tenantId, userId, sessionId })` with the conversation's id. Then call
    `session.call(name, args, { toolCallId })` for every call the model proposes.
+   - **The taint is stored with the conversation** (`tool_sessions`), not in the session object. The agent's next
+     turn is another request, often on another instance, and the poisoned text is still in its context. Keep it
+     elsewhere (Redis with a TTL) by passing your own `taint` store.
    - Return the result to the model as the tool result.
    - On `approval_required`, show the user the stored call (`tool_approvals.args`) and stop the loop until they
      decide.
    - When the app itself puts outside content into the prompt (RAG chunks, a pasted email), call
-     `session.markUntrusted()`.
-4. **Approvals.** The UI calls `guard.decide(approvalId, approverId, 'approved' | 'denied')`. The agent retries the
-   same call with `{ approvalId }`, and the guard spends the approval atomically:
+     `await session.markUntrusted()`.
+4. **Approvals.** The UI calls `guard.decide(approvalId, { tenantId, userId }, 'approved' | 'denied')` with the
+   approver's identity from *their* authenticated session: an approval can only be decided inside its own tenant.
+   The agent retries the same call with `{ approvalId }`, and the guard spends the approval atomically:
    - same tenant, session, tool and arguments;
    - approved, unused, unexpired.
+   A retry of a call that already ran (same `toolCallId`) gets its first result back without spending anything. A
+   call still `running` after `staleRunSec` (default 10 min) belongs to a process that died, and a retry takes it
+   over.
 5. **Model-facing schemas.** Pass `guard.schemas()` as the tool list. It is strict JSON Schema, with "needs a human
    approval" in the description so the model warns the user instead of retrying.
 6. **Monitor `tool_audit`.** Watch approval-required rates per tool, denied approvals, and rejected arguments. A
@@ -74,6 +82,11 @@ Against real Postgres. [verify/tests/llm-tool-safety.test.ts](../../verify/tests
   arguments is refused.
 - The audit trail records tool, tier, outcome and whether the context was tainted, for every call.
 - `schemas()` produces strict JSON Schema.
+- [latent-bugs-round3.test.ts](../../verify/tests/latent-bugs-round3.test.ts):
+  - the agent's next turn, through a new guard and session object, still has its write held for approval;
+  - a retried approved call returns its first result instead of "the approval was already used";
+  - an approver from another tenant can't decide the approval;
+  - a tool-call id left `running` by a crashed process can be retried.
 
 How to write these tests so they prove something:
 - Script the model: feed a tool result containing an injected instruction, then make the next call follow it. The
@@ -95,3 +108,8 @@ approval UI lives.
 - The tenant or user id as a tool argument.
 - No idempotency on write tools. Agents retry on timeouts, and every retry is another refund.
 - Logging tool calls only when they succeed. The attempts that were blocked are the security signal.
+- Keeping the taint in process memory. The next turn of the conversation arrives as a new request, on any instance,
+  with the poisoned text still in the context, and a write runs without approval.
+- An approval endpoint that takes any approver id. Decide only within the approver's own tenant.
+- A `pattern` regex with the g or y flag: `test()` continues from the last match, so every other call validates
+  differently. The guard refuses such tools at startup.

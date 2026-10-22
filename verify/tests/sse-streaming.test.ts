@@ -113,18 +113,19 @@ describe('sse-streaming', () => {
   });
 
   it('reconnect with Last-Event-ID replays exactly what was missed, then follows live', async () => {
-    feed.append({ orders: 1 }, 'stats'); // id 1
-    feed.append({ orders: 2 }, 'stats'); // id 2
-    const live = collect('/feed', { headers: { 'last-event-id': '1' }, stopAfter: 2 });
+    const seen = feed.append({ orders: 1 }, 'stats'); // the client got this one before it dropped
+    const missed = feed.append({ orders: 2 }, 'stats');
+    const live = collect('/feed', { headers: { 'last-event-id': String(seen) }, stopAfter: 2 });
     await sleep(50);
-    feed.append({ orders: 3 }, 'stats'); // id 3, published while connected
+    const published = feed.append({ orders: 3 }, 'stats'); // published while connected
     const { events } = await live;
-    assert.deepEqual(events.filter((e) => !e.comment).map((e) => e.id), ['2', '3']);
+    assert.deepEqual(events.filter((e) => !e.comment).map((e) => e.id), [String(missed), String(published)]);
   });
 
   it('a client too far behind gets a reset instead of a silent gap', async () => {
-    for (let i = 0; i < 5; i++) feed.append({ orders: 10 + i }, 'stats'); // capacity 3 → old ids evicted
-    const { events } = await collect('/feed', { headers: { 'last-event-id': '1' }, stopAfter: 1 });
+    const evicted = feed.append({ orders: 9 }, 'stats');
+    for (let i = 0; i < 5; i++) feed.append({ orders: 10 + i }, 'stats'); // capacity 3 → `evicted` is gone
+    const { events } = await collect('/feed', { headers: { 'last-event-id': String(evicted) }, stopAfter: 1 });
     assert.equal(events.find((e) => !e.comment)!.event, 'reset');
   });
 

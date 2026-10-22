@@ -12,9 +12,9 @@ let pool: pg.Pool;
 let docA: string;
 let docB: string;
 
-async function auditRows(): Promise<{ leaks: any[]; bypass: any[] }> {
+async function auditRows(): Promise<{ leaks: any[]; bypass: any[]; unfiltered: any[] }> {
   const res = (await admin.query(await readSkillFile('multitenant-postgres', 'rls-audit.sql'))) as unknown as pg.QueryResult[];
-  return { leaks: res[0].rows, bypass: res[1].rows };
+  return { leaks: res[0].rows, bypass: res[1].rows, unfiltered: res[2].rows };
 }
 
 describe('multitenant-postgres', () => {
@@ -162,6 +162,7 @@ describe('multitenant-postgres', () => {
     let audit = await auditRows();
     assert.deepEqual(audit.leaks, []);
     assert.deepEqual(audit.bypass, []);
+    assert.deepEqual(audit.unfiltered, [], 'every policy of the kit schema filters by tenant');
     await admin.query(`CREATE TABLE invoices (id serial PRIMARY KEY, tenant_id uuid NOT NULL)`);
     audit = await auditRows();
     assert.deepEqual(audit.leaks.map((r) => r.table_name), ['invoices']);

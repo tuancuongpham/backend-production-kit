@@ -2,6 +2,7 @@
 // The LLM chooses a tool name + params; everything security-relevant (SQL text, tenant,
 // timeouts, row cap, audit) is decided here. Adapt the tool list to your domain.
 import pg from 'pg';
+import { withTransaction } from './pg-transaction.ts';
 
 export type ParamType = 'string' | 'number' | 'uuid' | 'date';
 
@@ -142,13 +143,46 @@ export interface AgentDbOptions {
   statementTimeoutMs?: number; // default 2000
   maxRows?: number; // default 200
   poolSize?: number; // default 5 — stay under the role's CONNECTION LIMIT
+  /**
+   * How long getting a connection may take (default 3000 ms). Without it, a database that accepts the TCP
+   * connection but never answers (a failover, a black-holed network) hangs every tool call forever.
+   */
+  connectTimeoutMs?: number;
+  /** Errors of idle pooled connections (the server ended one). Without a listener they would crash the process. */
+  onError?: (err: Error) => void;
 }
 
-export function createAgentDb(opts: AgentDbOptions) {
-  const pool = new pg.Pool({ connectionString: opts.connectionString, max: opts.poolSize ?? 5 });
-  const timeoutMs = opts.statementTimeoutMs ?? 2000;
+export interface ToolRunResult {
+  rows: Record<string, unknown>[];
+  truncated: boolean;
+}
 
-  async function run(toolName: string, rawParams: unknown, ctx: CallContext) {
+/** Runs the developer-written tools as the agent role: read-only, tenant-scoped, time-boxed, row-capped, audited. */
+export class AgentDb {
+  readonly #pool: pg.Pool;
+  readonly #tools: Record<string, ToolDef>;
+  readonly #audit: (entry: AuditEntry) => void;
+  readonly #timeoutMs: number;
+  readonly #maxRows: number;
+
+  constructor(o: AgentDbOptions) {
+    this.#tools = o.tools;
+    this.#audit = o.audit;
+    this.#timeoutMs = o.statementTimeoutMs ?? 2000;
+    this.#maxRows = o.maxRows ?? 200;
+    if (!Number.isInteger(this.#timeoutMs) || this.#timeoutMs < 1) throw new RangeError('agent db: statementTimeoutMs must be a positive integer');
+    this.#pool = new pg.Pool({
+      connectionString: o.connectionString,
+      max: o.poolSize ?? 5,
+      connectionTimeoutMillis: o.connectTimeoutMs ?? 3000,
+      // The server-side statement_timeout limits the query; this limits the wait for its answer over a slow network.
+      query_timeout: this.#timeoutMs + 1000,
+      application_name: 'agent-db', // find the agent's sessions in pg_stat_activity
+    });
+    this.#pool.on('error', (err) => o.onError?.(err));
+  }
+
+  async run(toolName: string, rawParams: unknown, ctx: CallContext): Promise<ToolRunResult> {
     const started = performance.now();
     const base = {
       tool: toolName,
@@ -158,7 +192,7 @@ export function createAgentDb(opts: AgentDbOptions) {
       params: (rawParams ?? {}) as Record<string, unknown>,
     };
     const fail = (error: unknown): never => {
-      opts.audit({
+      this.#audit({
         ...base,
         ok: false,
         rowCount: 0,
@@ -169,7 +203,7 @@ export function createAgentDb(opts: AgentDbOptions) {
       throw error;
     };
 
-    const tool = Object.hasOwn(opts.tools, toolName) ? opts.tools[toolName] : undefined;
+    const tool = Object.hasOwn(this.#tools, toolName) ? this.#tools[toolName] : undefined;
     if (!tool) return fail(new ToolInputError(`unknown tool: ${toolName}`));
     if (!UUID_RE.test(ctx.tenantId)) return fail(new ToolInputError('invalid tenant context'));
 
@@ -180,36 +214,29 @@ export function createAgentDb(opts: AgentDbOptions) {
       return fail(e);
     }
 
-    const maxRows = Math.min(tool.maxRows ?? opts.maxRows ?? 200, opts.maxRows ?? 200);
-    const client = await pool.connect();
-    // pg emits 'error' on a checked-out client whose connection dies between queries (failover);
-    // unheard, that crashes the process instead of failing this tool call.
-    let lost: Error | undefined;
-    const onLost = (err: Error) => {
-      lost = err;
-    };
-    client.on('error', onLost);
+    const maxRows = Math.min(tool.maxRows ?? this.#maxRows, this.#maxRows);
     try {
-      await client.query('BEGIN READ ONLY');
-      await client.query(
-        `SELECT set_config('app.tenant_id', $1, true), set_config('statement_timeout', $2, true)`,
-        [ctx.tenantId, String(timeoutMs)],
+      const res = await withTransaction(
+        this.#pool,
+        async (tx) => {
+          await tx.query(`SELECT set_config('app.tenant_id', $1, true), set_config('statement_timeout', $2, true)`, [ctx.tenantId, String(this.#timeoutMs)]);
+          // Fetch one extra row to know whether we truncated.
+          return tx.query(`SELECT * FROM (${tool.sql}) AS q LIMIT ${maxRows + 1}`, values);
+        },
+        { begin: 'BEGIN READ ONLY' },
       );
-      // Fetch one extra row to know whether we truncated.
-      const res = await client.query(`SELECT * FROM (${tool.sql}) AS q LIMIT ${maxRows + 1}`, values);
-      await client.query('COMMIT');
       const truncated = res.rows.length > maxRows;
       const rows = truncated ? res.rows.slice(0, maxRows) : res.rows;
-      opts.audit({ ...base, ok: true, rowCount: rows.length, truncated, durationMs: performance.now() - started });
+      this.#audit({ ...base, ok: true, rowCount: rows.length, truncated, durationMs: performance.now() - started });
       return { rows, truncated };
     } catch (e) {
-      await client.query('ROLLBACK').catch(() => {});
       return fail(e);
-    } finally {
-      client.off('error', onLost);
-      client.release(lost);
     }
   }
 
-  return { run, close: () => pool.end() };
+  close(): Promise<void> {
+    return this.#pool.end();
+  }
 }
+
+export const createAgentDb = (o: AgentDbOptions) => new AgentDb(o);

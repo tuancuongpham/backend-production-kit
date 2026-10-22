@@ -20,7 +20,7 @@ High concurrency is rarely the hard part: Node and Go handle 10k sockets on a la
 
 ## Implementation steps
 
-Start from [references/server.ts](references/server.ts) (node:http; wrap Express/Fastify/Hono inside `handler`):
+Start from [references/server.ts](references/server.ts) (node:http; wrap Express/Fastify/Hono inside `handler`), with `with-timeout.ts`, the kit's shared deadline helper:
 
 1. **Inbound timeouts**: `headersTimeout` (slowloris), `requestTimeout`, and `keepAliveTimeout` above the LB's idle timeout.
 2. **Outbound deadlines**: every DB query, `fetch` and LLM call gets `deadline(ms, ctx.signal)`. An unbounded call is a resource leak waiting for a slow day.

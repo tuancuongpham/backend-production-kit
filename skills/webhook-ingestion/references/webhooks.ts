@@ -1,7 +1,8 @@
 // Webhook ingestion: verify → store once → process async with retries → dead-letter → replay → reconcile.
 import { createHmac, timingSafeEqual } from 'node:crypto';
-import { setTimeout as sleep } from 'node:timers/promises';
 import type pg from 'pg';
+import { withTransaction } from './pg-transaction.ts';
+import { runLoops } from './worker-loop.ts';
 
 // ---------- 1. Signature verification (on the RAW body, before JSON.parse) ----------
 
@@ -78,6 +79,9 @@ export interface InboxRow {
  */
 export type Handler = (row: InboxRow, tx: pg.PoolClient) => Promise<void>;
 
+/** done · retry (back to pending, with backoff) · dead · ignored (no handler) · lost (another worker owns it now). */
+export type Outcome = 'done' | 'retry' | 'dead' | 'ignored' | 'lost';
+
 export interface WorkerOptions {
   pool: pg.Pool;
   /** Keyed by `${provider}:${event_type}`, falling back to `${provider}:*`. */
@@ -86,7 +90,11 @@ export interface WorkerOptions {
   batchSize?: number; // default 10
   baseDelayMs?: number; // default 2_000
   maxDelayMs?: number; // default 1h
-  stuckAfterSec?: number; // re-claim 'processing' rows older than this (worker crashed); default 300
+  /**
+   * A row still 'processing' this long after its claim, and no longer locked by a live handler transaction, belongs
+   * to a worker that died: it is claimed again. Default 300.
+   */
+  stuckAfterSec?: number;
   random?: () => number; // injectable for tests
   onDead?: (row: InboxRow, error: unknown) => void; // alert here
   /**
@@ -118,19 +126,81 @@ export function backoffMs(attempt: number, baseMs: number, maxMs: number, random
   return Math.round(exp / 2 + random() * (exp / 2));
 }
 
-export function createInboxWorker(o: WorkerOptions) {
-  const maxAttempts = o.maxAttempts ?? 8;
-  const base = o.baseDelayMs ?? 2_000;
-  const max = o.maxDelayMs ?? 3_600_000;
+/** A claimed row and the lease that proves this worker still owns it. */
+type Claimed = InboxRow & { lease_id: string };
 
-  async function claim(): Promise<InboxRow[]> {
+const positiveInt = (v: number, name: string) => {
+  if (!Number.isInteger(v) || v < 1) throw new RangeError(`webhook worker: ${name} must be a positive integer, got ${v}`);
+  return v;
+};
+
+/**
+ * Processes the inbox. Every claim gets a new lease id, and only the holder of the current lease may finish a row:
+ * the handler's transaction starts by locking its own row as that holder. While the lock is held, the claim's
+ * SKIP LOCKED passes over the row, so a handler slower than `stuckAfterSec` is never started a second time, and a
+ * worker that lost its row can't overwrite the outcome of the one that took it over.
+ */
+export class InboxWorker {
+  readonly #pool: pg.Pool;
+  readonly #handlers: Record<string, Handler>;
+  readonly #maxAttempts: number;
+  readonly #batchSize: number;
+  readonly #concurrency: number;
+  readonly #stuckAfterSec: number;
+  readonly #baseDelayMs: number;
+  readonly #maxDelayMs: number;
+  readonly #random: () => number;
+  readonly #onDead?: (row: InboxRow, error: unknown) => void;
+
+  constructor(o: WorkerOptions) {
+    this.#pool = o.pool;
+    this.#handlers = o.handlers;
+    this.#maxAttempts = positiveInt(o.maxAttempts ?? 8, 'maxAttempts');
+    this.#batchSize = positiveInt(o.batchSize ?? 10, 'batchSize');
+    this.#concurrency = positiveInt(o.concurrency ?? 1, 'concurrency');
+    this.#stuckAfterSec = positiveInt(o.stuckAfterSec ?? 300, 'stuckAfterSec');
+    this.#baseDelayMs = o.baseDelayMs ?? 2_000;
+    this.#maxDelayMs = o.maxDelayMs ?? 3_600_000;
+    this.#random = o.random ?? Math.random;
+    this.#onDead = o.onDead;
+  }
+
+  /** One claim → process tick. run() loops it; call it directly from tests or your own scheduler. */
+  async processOnce(): Promise<Outcome[]> {
+    const rows = await this.#claim();
+    const results: Outcome[] = new Array(rows.length);
+    let next = 0;
+    // A fixed number of lanes pulling from the batch: bounded parallelism, results in claim order.
+    const lane = async () => {
+      while (next < rows.length) {
+        const i = next++;
+        results[i] = await this.#process(rows[i]);
+      }
+    };
+    await Promise.all(Array.from({ length: Math.min(this.#concurrency, rows.length) }, lane));
+    return results;
+  }
+
+  /**
+   * The worker process: `loops` independent claim → process loops. Better than one loop with
+   * `concurrency` lanes when handler latency varies: a batch only ends when its slowest row does, so one
+   * slow provider call idles every other lane, while independent loops keep claiming (heavy-tailed
+   * handlers drained 1.8× faster, docs/performance.md). Keep `batchSize` small (2–5) here: rows a loop
+   * has claimed wait behind its current one. Await the returned promise in your shutdown hook after
+   * aborting, or a deploy strands claimed rows in 'processing' until `stuckAfterSec`.
+   */
+  run(r: RunOptions): Promise<void> {
+    return runLoops({ tick: async () => (await this.processOnce()).length > 0, signal: r.signal, loops: r.loops ?? 4, idleMs: r.idleMs, onError: r.onError });
+  }
+
+  async #claim(): Promise<Claimed[]> {
     // Two branches, each walking its own partial index in order and stopping after LIMIT rows: rows stuck
     // in 'processing' (a worker died) first, then due 'pending' rows. A single `pending OR stuck` filter
     // can't use either index's order, so Postgres fetches and sorts the whole due backlog on every claim:
     // the claim slows down exactly when a backlog builds up (docs/performance.md).
-    const { rows } = await o.pool.query<InboxRow>(
+    const { rows } = await this.#pool.query<Claimed>(
       `UPDATE webhook_inbox
-         SET status = 'processing', locked_at = now(), attempts = attempts + 1
+         SET status = 'processing', locked_at = now(), attempts = attempts + 1, lease_id = gen_random_uuid()
        WHERE id IN (
          SELECT id FROM (
            SELECT id FROM webhook_inbox
@@ -146,104 +216,69 @@ export function createInboxWorker(o: WorkerOptions) {
            LIMIT $1
            FOR UPDATE SKIP LOCKED) due
          LIMIT $1)
-       RETURNING id, provider, event_id, event_type, payload, attempts, source`,
-      [o.batchSize ?? 10, o.stuckAfterSec ?? 300],
+       RETURNING id, provider, event_id, event_type, payload, attempts, source, lease_id`,
+      [this.#batchSize, this.#stuckAfterSec],
     );
     return rows;
   }
 
-  async function processRow(row: InboxRow): Promise<'done' | 'retry' | 'dead' | 'ignored'> {
-    const handler = o.handlers[`${row.provider}:${row.event_type}`] ?? o.handlers[`${row.provider}:*`];
-    const client = await o.pool.connect();
-    // pg emits 'error' on a checked-out client whose connection dies between queries (a slow handler meets
-    // idle_in_transaction_session_timeout, or a failover). Unheard, that crashes the worker process; heard,
-    // the handler's next query fails and the row goes back to 'pending' with a backoff.
-    let lost: Error | undefined;
-    const onLost = (err: Error) => {
-      lost = err;
-    };
-    client.on('error', onLost);
+  async #process(row: Claimed): Promise<Outcome> {
+    const handler = this.#handlers[`${row.provider}:${row.event_type}`] ?? this.#handlers[`${row.provider}:*`];
     try {
-      if (!handler) {
-        // Unknown event types are acknowledged, not retried forever. Keep the row for audit.
-        await client.query(
-          `UPDATE webhook_inbox SET status = 'done', processed_at = now(), locked_at = NULL, last_error = 'ignored: no handler' WHERE id = $1`,
+      return await withTransaction(this.#pool, async (tx) => {
+        const own = await tx.query(`SELECT 1 FROM webhook_inbox WHERE id = $1 AND lease_id = $2 FOR UPDATE`, [row.id, row.lease_id]);
+        if (own.rowCount === 0) return 'lost';
+        if (!handler) {
+          // Unknown event types are acknowledged, not retried forever. Keep the row for audit.
+          await tx.query(
+            `UPDATE webhook_inbox SET status = 'done', processed_at = now(), locked_at = NULL, lease_id = NULL, last_error = 'ignored: no handler' WHERE id = $1`,
+            [row.id],
+          );
+          return 'ignored';
+        }
+        await handler(row, tx);
+        await tx.query(
+          `UPDATE webhook_inbox SET status = 'done', processed_at = now(), locked_at = NULL, lease_id = NULL, last_error = NULL WHERE id = $1`,
           [row.id],
         );
-        return 'ignored';
-      }
-      await client.query('BEGIN');
-      await handler(row, client);
-      await client.query(`UPDATE webhook_inbox SET status = 'done', processed_at = now(), locked_at = NULL, last_error = NULL WHERE id = $1`, [row.id]);
-      await client.query('COMMIT');
-      return 'done';
+        return 'done';
+      });
     } catch (err) {
-      await client.query('ROLLBACK').catch(() => {});
-      const dead = row.attempts >= maxAttempts;
-      const delay = backoffMs(row.attempts, base, max, o.random);
-      await o.pool.query(
-        `UPDATE webhook_inbox
-           SET status = $2, locked_at = NULL, last_error = $3,
-               next_attempt_at = now() + make_interval(secs => $4::float8 / 1000)
-         WHERE id = $1`,
-        [row.id, dead ? 'dead' : 'pending', String(err instanceof Error ? err.message : err).slice(0, 2000), delay],
-      );
-      if (dead) o.onDead?.(row, err);
-      return dead ? 'dead' : 'retry';
-    } finally {
-      client.off('error', onLost);
-      client.release(lost);
+      // The handler threw, or its connection died (failover, idle_in_transaction_session_timeout): the transaction
+      // rolled back, so nothing it did happened. Back off, unless the row has changed hands meanwhile.
+      return this.#fail(row, err);
     }
   }
 
-  /** One claim → process tick. run() loops it; call it directly from tests or your own scheduler. */
-  async function processOnce() {
-    const rows = await claim();
-    const results: Array<Awaited<ReturnType<typeof processRow>>> = new Array(rows.length);
-    let next = 0;
-    // A fixed number of lanes pulling from the batch: bounded parallelism, results in claim order.
-    const lane = async () => {
-      while (next < rows.length) {
-        const i = next++;
-        results[i] = await processRow(rows[i]);
-      }
-    };
-    await Promise.all(Array.from({ length: Math.max(1, Math.min(o.concurrency ?? 1, rows.length)) }, lane));
-    return results;
+  async #fail(row: Claimed, err: unknown): Promise<Outcome> {
+    const dead = row.attempts >= this.#maxAttempts;
+    const res = await this.#pool.query(
+      `UPDATE webhook_inbox
+         SET status = $3, locked_at = NULL, lease_id = NULL, last_error = $4,
+             next_attempt_at = now() + make_interval(secs => $5::float8 / 1000)
+       WHERE id = $1 AND lease_id = $2`,
+      [
+        row.id,
+        row.lease_id,
+        dead ? 'dead' : 'pending',
+        String(err instanceof Error ? err.message : err).slice(0, 2000),
+        backoffMs(row.attempts, this.#baseDelayMs, this.#maxDelayMs, this.#random),
+      ],
+    );
+    if (res.rowCount === 0) return 'lost';
+    if (dead) this.#onDead?.(row, err);
+    return dead ? 'dead' : 'retry';
   }
-
-  /**
-   * The worker process: `loops` independent claim → process loops. Better than one loop with
-   * `concurrency` lanes when handler latency varies: a batch only ends when its slowest row does, so one
-   * slow provider call idles every other lane, while independent loops keep claiming (heavy-tailed
-   * handlers drained 1.8× faster, docs/performance.md). Keep `batchSize` small (2–5) here: rows a loop
-   * has claimed wait behind its current one. Await the returned promise in your shutdown hook after
-   * aborting, or a deploy strands claimed rows in 'processing' until `stuckAfterSec`.
-   */
-  async function run(r: RunOptions): Promise<void> {
-    const loop = async () => {
-      while (!r.signal.aborted) {
-        let worked = false;
-        try {
-          worked = (await processOnce()).length > 0;
-        } catch (err) {
-          r.onError?.(err);
-        }
-        if (!worked) await sleep(r.idleMs ?? 1000, undefined, { signal: r.signal }).catch(() => {}); // abort ends the nap
-      }
-    };
-    await Promise.all(Array.from({ length: Math.max(1, r.loops ?? 4) }, loop));
-  }
-
-  return { processOnce, run };
 }
+
+export const createInboxWorker = (o: WorkerOptions) => new InboxWorker(o);
 
 // ---------- 4. Replay: put dead (or any selected) events back in the queue ----------
 
 export async function replay(pool: pg.Pool, filter: { ids?: string[]; provider?: string; eventType?: string; status?: 'dead' | 'done' }) {
   const res = await pool.query(
     `UPDATE webhook_inbox
-       SET status = 'pending', attempts = 0, next_attempt_at = now(), locked_at = NULL, last_error = NULL
+       SET status = 'pending', attempts = 0, next_attempt_at = now(), locked_at = NULL, lease_id = NULL, last_error = NULL
      WHERE status = $1
        AND ($2::bigint[] IS NULL OR id = ANY($2))
        AND ($3::text IS NULL OR provider = $3)

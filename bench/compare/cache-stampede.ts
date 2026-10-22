@@ -71,7 +71,7 @@ const rows = [
     variant: 'C. shipped, entry stale (stale-while-revalidate)',
     ...(await storm(shipped, async (p) => {
       // A value written an hour ago: its fresh time is over, its stale window isn't.
-      await clients[0].set(`${p}:dashboard`, JSON.stringify({ v: { rows: 41 }, freshUntil: Date.now() - 1 }), 'PX', 60_000);
+      await clients[0].set(`${p}:dashboard`, `${Date.now() - 1}:${JSON.stringify({ rows: 41 })}`, 'PX', 60_000); // a stale entry
     })),
   },
 ];

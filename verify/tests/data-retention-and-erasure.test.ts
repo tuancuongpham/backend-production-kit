@@ -124,7 +124,8 @@ describe('data-retention-and-erasure', () => {
   });
 
   it('erasure is all or nothing in the database: one failing table rolls back every other', async () => {
-    const broken: InventoryEntry[] = inventory.map((e) => (e.table === 'audit_log' ? { ...e, anonymize: { actor_id: 'no_such_column' } } : e));
+    // Valid at startup (every personal column is overwritten), but the expression fails when it runs.
+    const broken: InventoryEntry[] = inventory.map((e) => (e.table === 'audit_log' ? { ...e, anonymize: { actor_id: 'no_such_column', ip_address: 'NULL' } } : e));
     const lifecycle = createDataLifecycle({ pool, inventory: broken, pepper: 'test-pepper' });
     await assert.rejects(lifecycle.requestErasure(ALICE.id), /no_such_column/);
     assert.equal((await pool.query(`SELECT count(*)::int AS n FROM chat_messages WHERE user_id = $1`, [ALICE.id])).rows[0].n, 1, 'nothing half-erased');

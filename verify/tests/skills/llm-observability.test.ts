@@ -109,6 +109,13 @@ describe('llm-observability', () => {
     assert.ok(s.events.some((e) => e.name === 'exception'));
   });
 
+  it('a failed retrieval marks its span too, and the error reaches the caller', async () => {
+    await assert.rejects(withRetrievalSpan(tracer, 'chính sách đổi trả', async () => Promise.reject(new Error('vector index offline'))), /offline/);
+    const s = exporter.getFinishedSpans().filter((x) => x.name === 'retrieve').at(-1)!;
+    assert.equal(s.status.code, 2); // ERROR
+    assert.ok(s.events.some((e) => e.name === 'exception'));
+  });
+
   it('trace context survives an async hop (outbox / queue / webhook inbox)', async () => {
     let headers: Record<string, string> = {};
     let producerSpanId = '';

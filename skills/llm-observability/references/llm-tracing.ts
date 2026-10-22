@@ -83,8 +83,9 @@ export interface ContentOptions {
 
 const DEFAULT_MAX_CONTENT = 32 * 1024;
 
+/** At most `max` characters, cut between two characters: a cut inside an emoji leaves half of it, invalid text. */
 function bounded(s: string, max: number) {
-  return s.length > max ? `${s.slice(0, max)}…[TRUNCATED ${s.length - max} chars]` : s;
+  return s.length > max ? `${s.slice(0, max).toWellFormed()}…[TRUNCATED ${s.length - max} chars]` : s;
 }
 
 function contentJson(messages: TraceMessage[], redact: ((s: string) => string) | undefined, max: number) {

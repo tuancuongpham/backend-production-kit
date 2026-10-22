@@ -34,7 +34,10 @@ Ask these together, in one message. If they don't know, propose the default and 
    Put this in a migration, not a one-off script, so staging and prod match.
 2. **Build the executor.** Start from [references/agent-db-tool.ts](references/agent-db-tool.ts). It:
    - declares tools as `{ description, sql, params[] }`. The developer writes the SQL; the model only supplies typed values;
-   - rejects unknown tools, unknown or missing params, and wrong types (uuid/number/date/bounded string);
+   - rejects unknown tools, unknown or missing params, and wrong types (uuid/number/date/bounded string). It also
+     rejects what Postgres would refuse, so the model gets a `ToolInputError` it can correct rather than a database
+     error: a string holding a NUL, and a date that doesn't exist. `Date.parse` turns `2026-02-31` into March 3 and
+     accepts year 0, while Postgres refuses both;
    - runs `BEGIN READ ONLY` → `set_config('app.tenant_id', $tenant, true)` → `set_config('statement_timeout', …, true)` → the query wrapped in `LIMIT maxRows+1` → `COMMIT`;
    - returns `{ rows, truncated }` and audits success *and* failure;
    - exports `toToolSchemas()` so the same definitions feed the LLM's tool list. No drift between what is allowed and what is advertised.
@@ -44,7 +47,9 @@ Ask these together, in one message. If they don't know, propose the default and 
    `createAgentDb` (an `AgentDb`) owns that pool and sets what a pool needs to survive a bad day: a connect timeout
    (`connectTimeoutMs`, default 3 s), a client-side query timeout (the statement timeout plus 1 s), an `error`
    listener for idle connections the server ends (`onError`), and `application_name: 'agent-db'` so the agent's
-   sessions are easy to find in `pg_stat_activity`. Copy `pg-transaction.ts` along with `agent-db-tool.ts`.
+   sessions are easy to find in `pg_stat_activity`. The listener calls `onError` through `callHook`: a hook that
+   throws there would be an uncaught exception, the crash the listener exists to prevent. Copy `pg-transaction.ts`
+   and `hooks.ts` along with `agent-db-tool.ts`.
 
 ### If the user insists on raw SQL (text-to-SQL)
 Raise the bar further and say plainly that this is weaker:

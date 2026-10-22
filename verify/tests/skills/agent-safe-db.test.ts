@@ -128,6 +128,9 @@ describe('agent-safe-db', () => {
       await assert.rejects(db.run('list_recent_orders', { status: 'paid', sql: 'DROP' }, ctx), ToolInputError);
       await assert.rejects(db.run('get_customer_orders', { customer_id: "x' OR 1=1 --" }, ctx), ToolInputError);
       await assert.rejects(db.run('__proto__', {}, ctx), ToolInputError);
+      // Params that aren't an object at all: a SQL string or an array where the model should have sent { … }.
+      await assert.rejects(db.run('list_recent_orders', 'DROP TABLE orders', ctx), ToolInputError);
+      await assert.rejects(db.run('list_recent_orders', ['paid'], ctx), ToolInputError);
     });
 
     it('per-call statement timeout cancels slow queries', async () => {

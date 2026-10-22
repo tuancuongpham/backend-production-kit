@@ -2,6 +2,7 @@
 // The LLM chooses a tool name + params; everything security-relevant (SQL text, tenant,
 // timeouts, row cap, audit) is decided here. Adapt the tool list to your domain.
 import pg from 'pg';
+import { callHook } from './hooks.ts';
 import { withTransaction } from './pg-transaction.ts';
 
 export type ParamType = 'string' | 'number' | 'uuid' | 'date';
@@ -46,6 +47,17 @@ export class ToolInputError extends Error {}
 
 const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 const DATE_RE = /^\d{4}-\d{2}-\d{2}(T[\d:.]+(Z|[+-]\d{2}:?\d{2})?)?$/;
+
+/**
+ * An ISO date that exists. Date.parse alone is lenient: '2026-02-31' becomes March 3, while Postgres refuses it, so
+ * the model would see a database error instead of a clear parameter error.
+ */
+function isRealDate(v: string): boolean {
+  if (!DATE_RE.test(v) || Number.isNaN(Date.parse(v))) return false;
+  const [y, m, d] = v.slice(0, 10).split('-').map(Number);
+  const day = new Date(Date.UTC(y, m - 1, d));
+  return day.getUTCFullYear() === y && day.getUTCMonth() === m - 1 && day.getUTCDate() === d;
+}
 
 // Example tools. Keep them narrow: one question each, small result sets.
 export const exampleTools = {
@@ -96,13 +108,13 @@ function coerceParams(tool: ToolDef, raw: unknown): unknown[] {
         if (typeof v !== 'string' || !UUID_RE.test(v)) throw new ToolInputError(`${p.name} must be a uuid`);
         return v;
       case 'date':
-        if (typeof v !== 'string' || !DATE_RE.test(v) || Number.isNaN(Date.parse(v))) {
-          throw new ToolInputError(`${p.name} must be an ISO date`);
-        }
+        if (typeof v !== 'string' || !isRealDate(v)) throw new ToolInputError(`${p.name} must be an ISO date that exists`);
         return v;
       case 'string':
         if (typeof v !== 'string') throw new ToolInputError(`${p.name} must be a string`);
         if (v.length > (p.maxLength ?? 200)) throw new ToolInputError(`${p.name} is too long`);
+        // Postgres text can't hold U+0000: tell the model, instead of failing in the database.
+        if (v.includes('\u0000')) throw new ToolInputError(`${p.name} must not contain NUL characters`);
         return v;
     }
   });
@@ -149,7 +161,7 @@ export interface AgentDbOptions {
    */
   connectTimeoutMs?: number;
   /** Errors of idle pooled connections (the server ended one). Without a listener they would crash the process. */
-  onError?: (err: Error) => void;
+  onError?: (err: Error) => unknown;
 }
 
 export interface ToolRunResult {
@@ -179,7 +191,8 @@ export class AgentDb {
       query_timeout: this.#timeoutMs + 1000,
       application_name: 'agent-db', // find the agent's sessions in pg_stat_activity
     });
-    this.#pool.on('error', (err) => o.onError?.(err));
+    // Inside an 'error' event: a hook that throws here would be an uncaught exception, the crash this listener prevents.
+    this.#pool.on('error', (err) => callHook(o.onError, err));
   }
 
   async run(toolName: string, rawParams: unknown, ctx: CallContext): Promise<ToolRunResult> {

@@ -54,7 +54,7 @@ describe('llm-gateway', () => {
   it('exact cache: identical request hits cache, provider called once, cost 0 on hit', async () => {
     const primary = fakeProvider('anthropic', 'big-model');
     const usage: UsageRecord[] = [];
-    const gw = createGateway({ providers: [primary], prices, cache: memoryCache(), onUsage: (u) => usage.push(u) });
+    const gw = createGateway({ providers: [primary], prices, cache: memoryCache(), onUsage: (u) => void usage.push(u) });
     const a = await gw.chat(ask('Where is my order?'), { tenantId: 't1' });
     const b = await gw.chat(ask('Where is my order?'), { tenantId: 't1' });
     assert.equal(a.cache, 'miss');
@@ -88,6 +88,37 @@ describe('llm-gateway', () => {
     assert.equal(shadow[0].question, 'how can i get my money back');
     assert.equal(shadow[0].cachedQuestion, 'How do I get a refund?');
     assert.ok(shadow[0].similarity > 0.99);
+  });
+
+  it('an embedding provider that fails only costs the semantic cache: the request is answered, the failure reported', async () => {
+    const stages: string[] = [];
+    const gw = createGateway({
+      providers: [fakeProvider('anthropic', 'big-model')],
+      prices,
+      cache: memoryCache(),
+      embed: async () => Promise.reject(new Error('embeddings 503')),
+      semanticMode: 'serve',
+      onError: (_err, stage) => void stages.push(stage),
+    });
+    const r = await gw.chat(ask('How do I get a refund?'), { tenantId: 't1' });
+    assert.deepEqual([r.content, r.cache, stages], ['anthropic answer to: How do I get a refund?', 'miss', ['embed']]);
+  });
+
+  it('an async onShadowHit that rejects is reported to onError, never left as an unhandled rejection', async () => {
+    const stages: string[] = [];
+    const primary = fakeProvider('anthropic', 'big-model');
+    const gw = createGateway({
+      providers: [primary],
+      prices,
+      cache: memoryCache(),
+      embed,
+      onShadowHit: async () => Promise.reject(new Error('labelling queue down')),
+      onError: (_err, stage) => void stages.push(stage),
+    });
+    await gw.chat(ask('How do I get a refund?'), { tenantId: 't1' });
+    await gw.chat(ask('how can i get my money back'), { tenantId: 't1' }); // a would-be semantic hit
+    await new Promise((r) => setTimeout(r, 20));
+    assert.deepEqual(stages, ['cache-read']);
   });
 
   it('cache never crosses tenants or system prompts (exact and semantic)', async () => {
@@ -165,7 +196,7 @@ describe('llm-gateway', () => {
       prices,
       // Each call reserves ≈ $0.0155 (pessimistic estimate) and settles at $0.0105 (actual).
       budget: { store: memoryBudget(), monthlyLimitUsd: (t) => (t === 'free' ? 0.03 : 100) },
-      onUsage: (u) => usage.push(u),
+      onUsage: (u) => void usage.push(u),
     });
     await gw.chat(ask('q1'), { tenantId: 'free' }); // spent 0.0105
     await gw.chat(ask('q2'), { tenantId: 'free' }); // spent 0.021

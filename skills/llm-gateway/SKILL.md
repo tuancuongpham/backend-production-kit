@@ -37,7 +37,7 @@ LLM APIs are the most expensive and least reliable dependency most apps have. Th
    - **Optional infrastructure fails open**: a cache store or embedding API that is down means no cache for that request, not a failed request. The budget store is a control and fails closed: if the reservation can't be made, the request fails.
    - **Cost** comes from a price table **in config**. Prices change; a missing price shows up as cost 0 and should alert.
    - **Accounting never fails a request**: `onUsage` errors, sync or async, are caught and passed to `onUsageError` (or `onError`).
-   - Copy `circuit-breaker.ts` and `pg-transaction.ts` along with the gateway files: they are the kit's shared building blocks, identical in every skill that has them.
+   - Copy `circuit-breaker.ts`, `hooks.ts`, `pg-transaction.ts` and `pg-values.ts` along with the gateway files: they are the kit's shared building blocks, identical in every skill that has them.
 2. **Stores**: [references/semantic-cache.sql](references/semantic-cache.sql) + [references/pg-stores.ts](references/pg-stores.ts):
    - Postgres/pgvector exact and semantic caches (Redis is a fine alternative for the exact cache);
    - the semantic lookup searches **only the caller's scope, exactly**, by default (`pgCache(pool)`). Measured p50 is 0.3 ms at 120 entries per scope, 1.5 ms at 1,000 and 9 ms at 5,000;
@@ -92,6 +92,9 @@ ADR: build vs buy, fallback chain and its quality trade-off, semantic cache thre
 - One try/catch around "call the model, then cache and settle". A cache or ledger error after the model answered looked like a provider failure: the gateway bought the answer again from the fallback, counted a failure against the healthy provider, and left the budget reservation stuck.
 - Prices hardcoded next to business logic: wrong costs for months after a price change.
 - Writing usage synchronously and failing the request when the ledger write fails.
+- Calling the app's hooks bare. An `onUsageError` that threw failed a request whose answer was already paid for, and
+  an async `onShadowHit` that rejected was an unhandled rejection. Hooks run through `callHook` (`hooks.ts`); a
+  failing one is reported to `onError`, never further.
 - Checking the budget with a read (`SELECT sum(cost)`) and then calling: under load, every in-flight request passes the check.
 - Turning the semantic cache on in `serve` mode on day one, with a threshold nobody measured.
 - A model missing from the price table. Its estimate and cost are $0, so the budget silently never limits anything. The reference gateway refuses to start with budgets on and an unpriced model.

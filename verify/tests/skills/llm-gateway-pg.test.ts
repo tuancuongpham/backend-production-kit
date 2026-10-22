@@ -37,6 +37,17 @@ describe('llm-gateway (Postgres stores)', () => {
     assert.equal(await c.findSimilar('scope-b', v, 0.95), null, 'other scope misses');
   });
 
+  it("semantic cache with the HNSW index ('ann', for very large scopes): the same threshold and scope rules", async () => {
+    const c = pgCache(pool, { semanticSearch: 'ann' });
+    const v = fakeEmbedding(7);
+    await c.saveSimilar('scope-ann', v, value, 60);
+    for (let i = 0; i < 50; i++) await c.saveSimilar('scope-noise', fakeEmbedding(100 + i), value, 60); // other tenants' entries
+    const hit = await c.findSimilar('scope-ann', v.map((x, i) => (i === 0 ? x + 0.01 : x)), 0.95);
+    assert.ok(hit && hit.similarity > 0.99, 'found through the index, past the other scopes');
+    assert.equal(await c.findSimilar('scope-ann', fakeEmbedding(8), 0.95), null);
+    assert.equal(await c.findSimilar('scope-other', v, 0.95), null);
+  });
+
   it('budget reservations are atomic across app instances; the ledger records every call', async () => {
     const provider: Provider = {
       name: 'p',

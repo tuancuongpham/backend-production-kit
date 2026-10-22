@@ -4,6 +4,7 @@
 // or an upstream gateway such as LiteLLM / Vercel AI Gateway).
 import { createHash } from 'node:crypto';
 import { CircuitBreaker } from './circuit-breaker.ts';
+import { callHook } from './hooks.ts';
 
 export interface ChatMessage {
   role: 'system' | 'user' | 'assistant';
@@ -125,7 +126,7 @@ export interface GatewayOptions {
    */
   semanticMode?: 'off' | 'shadow' | 'serve';
   semanticThreshold?: number; // cosine similarity, default 0.95
-  onShadowHit?: (h: ShadowHit) => void;
+  onShadowHit?: (h: ShadowHit) => unknown;
   cacheTtlSec?: number; // default 24h
   /**
    * TTL for answers that came from a fallback provider (default 300 s). They are what was available during an
@@ -139,14 +140,14 @@ export interface GatewayOptions {
     estimateUsd?: (req: ChatRequest) => number;
   };
   /** Accounting must never fail the user's request: errors (sync or async) are swallowed and passed to onUsageError. */
-  onUsage?: (u: UsageRecord) => void | Promise<unknown>;
-  onUsageError?: (err: unknown) => void;
+  onUsage?: (u: UsageRecord) => unknown;
+  onUsageError?: (err: unknown) => unknown;
   /**
    * Failures of optional infrastructure: the cache store, embeddings, settling the budget after a call (the
    * reservation then stays until you reconcile it from llm_usage), and the usage sink when onUsageError isn't set.
    * Log and count them: the request goes on without that piece.
    */
-  onError?: (err: unknown, stage: GatewayStage) => void;
+  onError?: (err: unknown, stage: GatewayStage) => unknown;
   timeoutMs?: number; // per provider attempt, default 60s
   /** Per provider: open after `threshold` failures in a row; after `cooldownMs`, one probe call decides. Default 3 → 30 s. */
   breaker?: { threshold: number; cooldownMs: number };
@@ -210,9 +211,9 @@ export class LlmGateway {
   readonly #ttlSec: number;
   readonly #fallbackTtlSec: number;
   readonly #budget?: GatewayOptions['budget'];
-  readonly #onShadowHit?: (h: ShadowHit) => void;
+  readonly #onShadowHit?: (h: ShadowHit) => unknown;
   readonly #onUsage?: GatewayOptions['onUsage'];
-  readonly #onUsageError?: (err: unknown) => void;
+  readonly #onUsageError?: (err: unknown) => unknown;
   readonly #onError?: GatewayOptions['onError'];
   readonly #timeoutMs: number;
   readonly #now: () => number;
@@ -325,11 +326,9 @@ export class LlmGateway {
     const similar = await this.#bestEffort('cache-read', () => this.#cache!.findSimilar(scope, embedding, this.#threshold), null);
     if (similar && this.#semanticMode === 'shadow') {
       // Would have served this: report the pair for labelling. The model is called anyway.
-      try {
-        this.#onShadowHit?.({ tenantId: ctx.tenantId, question, cachedQuestion: similar.value.question, similarity: similar.similarity });
-      } catch (err) {
-        this.#report(err, 'cache-read');
-      }
+      this.#observe('cache-read', () =>
+        this.#onShadowHit?.({ tenantId: ctx.tenantId, question, cachedQuestion: similar.value.question, similarity: similar.similarity }),
+      );
     }
     return { question, embedding, similar };
   }
@@ -421,12 +420,23 @@ export class LlmGateway {
   }
 
   #record(ctx: CallContext, started: number, u: Accounting) {
-    const usageError = (err: unknown) => (this.#onUsageError ? this.#onUsageError(err) : this.#report(err, 'usage'));
+    const usage = { tenantId: ctx.tenantId, userId: ctx.userId, feature: ctx.feature, ...u, latencyMs: this.#now() - started };
+    if (!this.#onUsageError) return this.#observe('usage', () => this.#onUsage?.(usage));
     try {
-      const r = this.#onUsage?.({ tenantId: ctx.tenantId, userId: ctx.userId, feature: ctx.feature, ...u, latencyMs: this.#now() - started });
-      if (r && typeof (r as Promise<unknown>).catch === 'function') (r as Promise<unknown>).catch(usageError);
+      const r = this.#onUsage?.(usage);
+      if (r && typeof (r as Promise<unknown>).catch === 'function') (r as Promise<unknown>).catch((err) => callHook(this.#onUsageError, err));
     } catch (err) {
-      usageError(err);
+      callHook(this.#onUsageError, err);
+    }
+  }
+
+  /** Runs a hook of the app's; whether it throws or its promise rejects, the failure goes to onError, never further. */
+  #observe(stage: GatewayStage, hook: () => unknown) {
+    try {
+      const r = hook();
+      if (r && typeof (r as Promise<unknown>).catch === 'function') (r as Promise<unknown>).catch((err) => this.#report(err, stage));
+    } catch (err) {
+      this.#report(err, stage);
     }
   }
 
@@ -440,11 +450,7 @@ export class LlmGateway {
   }
 
   #report(err: unknown, stage: GatewayStage) {
-    try {
-      this.#onError?.(err, stage);
-    } catch {
-      // an error hook that throws must not take the request down with it
-    }
+    callHook(this.#onError, err, stage); // an error hook that throws must not take the request down with it
   }
 }
 
@@ -461,7 +467,7 @@ export function cosineSimilarity(a: number[], b: number[]): number {
     na += a[i] * a[i];
     nb += b[i] * b[i];
   }
-  return na && nb ? dot / Math.sqrt(na * nb) : 0;
+  return na && nb ? dot / (Math.sqrt(na) * Math.sqrt(nb)) : 0; // not sqrt(na * nb): the product of two small norms underflows to 0
 }
 
 export function memoryCache(now: () => number = Date.now): CacheStore {

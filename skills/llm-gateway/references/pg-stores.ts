@@ -2,6 +2,7 @@
 import type pg from 'pg';
 import type { BudgetStore, CacheStore, CachedResponse, UsageRecord } from './gateway.ts';
 import { withTransaction } from './pg-transaction.ts';
+import { pgJson, pgText } from './pg-values.ts';
 
 /**
  * Embedding as a binary query parameter. node-postgres sends Buffers in binary format and pgvector reads
@@ -45,7 +46,7 @@ export function pgCache(pool: pg.Pool, opts: PgCacheOptions = {}): CacheStore {
       await pool.query(
         `INSERT INTO llm_exact_cache (key, value, expires_at) VALUES ($1, $2, now() + make_interval(secs => $3))
          ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value, expires_at = EXCLUDED.expires_at`,
-        [key, JSON.stringify(value), ttlSec],
+        [key, pgJson(value), ttlSec], // model output can contain NUL, which jsonb rejects
       );
     },
     async findSimilar(scope, embedding, minSimilarity) {
@@ -89,7 +90,7 @@ export function pgCache(pool: pg.Pool, opts: PgCacheOptions = {}): CacheStore {
       await pool.query(
         `INSERT INTO llm_semantic_cache (scope, embedding, value, expires_at)
          VALUES ($1, $2::vector, $3, now() + make_interval(secs => $4))`,
-        [scope, vectorParam(embedding), JSON.stringify(value), ttlSec],
+        [scope, vectorParam(embedding), pgJson(value), ttlSec],
       );
     },
   };
@@ -153,7 +154,7 @@ export function pgUsageSink(pool: pg.Pool, traceId?: () => string | undefined) {
          input_tokens, output_tokens, cost_usd, latency_ms, fallback_from, ok, error)
        VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14)`,
       [u.tenantId, u.userId ?? null, u.feature ?? null, traceId?.() ?? null, u.provider, u.model, u.cache,
-        u.inputTokens, u.outputTokens, u.costUsd, Math.round(u.latencyMs), u.fallbackFrom, u.ok, u.error ?? null],
+        u.inputTokens, u.outputTokens, u.costUsd, Math.round(u.latencyMs), u.fallbackFrom, u.ok, pgText(u.error ?? null)],
     );
   };
 }

@@ -108,7 +108,8 @@ function splitStatements(sql: string): string[] {
       i = end < 0 ? sql.length : end + 2;
       continue;
     }
-    const dollar = /^\$[A-Za-z_]*\$/.exec(rest);
+    // $$ or $tag$, where a tag is an identifier: $body$, $fn1$ (digits allowed after the first character).
+    const dollar = /^\$(?:[A-Za-z_][A-Za-z_0-9]*)?\$/.exec(rest);
     if (dollar) {
       const end = sql.indexOf(dollar[0], i + dollar[0].length);
       const stop = end < 0 ? sql.length : end + dollar[0].length;
@@ -117,8 +118,11 @@ function splitStatements(sql: string): string[] {
       continue;
     }
     if (sql[i] === "'") {
+      // In an E'…' string a backslash escapes the next character, so E'it\'s' doesn't end at \'. (An E right before
+      // the quote, and not the end of a longer identifier.)
+      const escapes = /[Ee]/.test(sql[i - 1] ?? '') && !/[\w$]/.test(sql[i - 2] ?? '');
       let j = i + 1;
-      while (j < sql.length && !(sql[j] === "'" && sql[j + 1] !== "'")) j += sql[j] === "'" ? 2 : 1;
+      while (j < sql.length && !(sql[j] === "'" && sql[j + 1] !== "'")) j += sql[j] === "'" || (escapes && sql[j] === '\\') ? 2 : 1;
       cur += sql.slice(i, j + 1);
       i = j + 1;
       continue;

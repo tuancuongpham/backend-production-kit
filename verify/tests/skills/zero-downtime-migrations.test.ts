@@ -163,6 +163,7 @@ describe('zero-downtime-migrations', () => {
       sizes.push(done - previous);
       previous = done;
     };
+    const deploy = new AbortController();
     await assert.rejects(
       backfill(pool, {
         table: 'accounts',
@@ -170,12 +171,13 @@ describe('zero-downtime-migrations', () => {
         where: 'plan_v2 IS NULL',
         batchSize: 5000,
         pauseMs: 0,
+        signal: deploy.signal,
         onBatch: (done) => {
           track(done);
-          if (done >= 10_000) throw new Error('deploy interrupted the backfill');
+          if (done >= 10_000) deploy.abort(new Error('deploy interrupted the backfill'));
         },
       }),
-      /interrupted/,
+      (err: Error & { lastId?: string }) => /interrupted/.test(err.message) && err.lastId !== undefined,
     );
     previous = 0;
     const resumed = await backfill(pool, { table: 'accounts', set: 'plan_v2 = upper(plan)', where: 'plan_v2 IS NULL', batchSize: 5000, pauseMs: 0, onBatch: track });
@@ -223,6 +225,35 @@ describe('zero-downtime-migrations', () => {
     assert.deepEqual(
       lintMigration(`BEGIN; CREATE INDEX CONCURRENTLY accounts_x_idx ON accounts (email); COMMIT;`).map((f) => f.rule),
       ['concurrently-in-transaction'],
+    );
+  });
+
+  it('the linter flags table rewrites, explicit locks and drops, and exempts a table the same file creates', () => {
+    const findings = lintMigration(`
+      CREATE TABLE invoices (id bigserial PRIMARY KEY, total int);
+      CREATE INDEX invoices_total_idx ON invoices (total);
+      ALTER TABLE invoices ADD COLUMN paid_at timestamptz NOT NULL;
+      DROP INDEX accounts_old_idx;
+      DROP INDEX CONCURRENTLY accounts_older_idx;
+      VACUUM FULL accounts;
+      CLUSTER accounts USING accounts_pkey;
+      REINDEX TABLE accounts;
+      REINDEX TABLE CONCURRENTLY accounts;
+      LOCK TABLE accounts IN ACCESS EXCLUSIVE MODE;
+      ALTER TABLE accounts ADD COLUMN region text NOT NULL;
+      DROP TABLE legacy_sessions;
+    `);
+    assert.deepEqual(
+      findings.map((f) => `${f.severity} ${f.rule}`),
+      [
+        'warning drop-index-not-concurrent',
+        'error table-rewrite',
+        'error table-rewrite',
+        'error table-rewrite',
+        'warning lock-table',
+        'error add-column-not-null',
+        'warning breaks-running-code',
+      ],
     );
   });
 });

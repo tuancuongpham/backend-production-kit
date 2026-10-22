@@ -46,7 +46,9 @@ against traffic.
    from `lastId` or from `where new_col IS NULL`. Run long ones as a job (`job-queue`). A batch that loses a
    deadlock against the app, or hits a serialization failure or a lock timeout, is retried (`retries`, default 5).
    If it still gives up, the error carries `lastId`: resume with `afterId: err.lastId`.
-   Copy `pg-transaction.ts` along with `migrate.ts`: it is the kit's shared transaction helper.
+   Pass `signal` (a job's `ctx.signal`, or one aborted on SIGTERM): the backfill stops after the current batch, and
+   the error carries `lastId` the same way. `onBatch` reports progress only; it can't stop the backfill.
+   Copy `hooks.ts` and `pg-transaction.ts` along with `migrate.ts`: they are the kit's shared building blocks.
 5. **Check before shipping.**
    - Every new index has `pg_index.indisvalid = true`.
    - No migration holds an exclusive lock longer than a second on production-sized data. Restore a copy and time it.
@@ -97,3 +99,9 @@ backfills are run and monitored.
   for the whole rollout.
 - Running migrations from every instance at startup, or inside the request path.
 - One `UPDATE` for the whole table "because it's just a data fix".
+- **A backfill nothing can stop.** Run inside a job (or during a deploy), it keeps writing after the job lost its
+  lease, while a second worker starts the same backfill. Pass `signal` (a job's `ctx.signal`): it stops after the
+  current batch, and the error carries `lastId`. Throwing from `onBatch` doesn't stop it: a hook can't change the
+  outcome of the work it watches.
+- Splitting a migration on every `;`. A function body in `$fn1$ … $fn1$` quotes, or an `E'it's; …'` string, is one
+  statement; the linter's splitter knows both.

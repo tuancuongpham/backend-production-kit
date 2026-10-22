@@ -6,6 +6,7 @@
 // Table names, SET clauses and conditions are migration code, written by developers. Never pass request data.
 import { setTimeout as sleep } from 'node:timers/promises';
 import type pg from 'pg';
+import { callHook } from './hooks.ts';
 import { withClient, withTransaction } from './pg-transaction.ts';
 
 export interface Step {
@@ -27,7 +28,7 @@ export interface StepOptions {
   attempts?: number;
   /** Pause before a retry: doubles from this (default 1000 ms) up to 30 s, with jitter. */
   baseDelayMs?: number;
-  onRetry?: (step: Step, attempt: number, err: unknown) => void;
+  onRetry?: (step: Step, attempt: number, err: unknown) => unknown;
 }
 
 const LOCK_NOT_AVAILABLE = '55P03';
@@ -71,7 +72,7 @@ export async function runStep(pool: pg.Pool, step: Step, o: StepOptions = {}): P
       return { attempts: attempt };
     } catch (err) {
       if (codeOf(err) !== LOCK_NOT_AVAILABLE || attempt >= attempts) throw err;
-      o.onRetry?.(step, attempt, err);
+      callHook(o.onRetry, step, attempt, err);
       await sleep(backoff(attempt, o.baseDelayMs ?? 1000));
     }
   }
@@ -106,7 +107,13 @@ export interface BackfillOptions {
   afterId?: string | number | null;
   /** Retries of a batch that hit a deadlock with the app, a serialization failure or a lock timeout (default 5). */
   retries?: number;
-  onBatch?: (done: number, lastId: string) => void;
+  /** Progress, after each batch. Whatever it throws is dropped: to stop the backfill, abort `signal`. */
+  onBatch?: (done: number, lastId: string) => unknown;
+  /**
+   * Abort to stop after the current batch (a deploy, the job's lease lost: pass a job's ctx.signal). backfill() then
+   * rejects with the abort reason, carrying `lastId`, like any interrupted run.
+   */
+  signal?: AbortSignal;
 }
 
 /**
@@ -141,14 +148,20 @@ export async function backfill(pool: pg.Pool, o: BackfillOptions): Promise<{ upd
       }
     }
   };
+  const stopIfAborted = () => {
+    if (!o.signal?.aborted) return;
+    const reason = o.signal.reason instanceof Error ? o.signal.reason : new Error('backfill stopped');
+    throw Object.assign(reason, { lastId });
+  };
   for (;;) {
+    stopIfAborted();
     const { rows } = await batch();
     if (rows.length === 0) return { updated, batches, lastId };
     lastId = String(rows.reduce((max, r) => (BigInt(r.id) > BigInt(max) ? r.id : max), rows[0].id));
     updated += rows.length;
     batches++;
-    o.onBatch?.(updated, lastId);
+    callHook(o.onBatch, updated, lastId); // a progress logger that fails must not stop the backfill halfway
     if (rows.length < batchSize) return { updated, batches, lastId };
-    await sleep(o.pauseMs ?? 50);
+    await sleep(o.pauseMs ?? 50, undefined, { signal: o.signal }).catch(() => {}); // an abort ends the pause at once
   }
 }

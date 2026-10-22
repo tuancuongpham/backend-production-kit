@@ -60,6 +60,13 @@ export function assertSlo(s: Slo): void {
 
 export function prometheusRules(slos: Slo[]) {
   slos.forEach(assertSlo);
+  // Each SLO is a rule group named after it. Prometheus refuses a file with a group name twice, and with it every
+  // other rule in the file: a copied SLO that kept its name would switch off all alerting.
+  const seen = new Set<string>();
+  for (const s of slos) {
+    if (seen.has(s.name)) throw new Error(`slo ${s.name}: two SLOs share this name; Prometheus would refuse the whole rule file`);
+    seen.add(s.name);
+  }
   return {
     groups: slos.map((s) => ({
       name: `slo:${s.name}`,

@@ -43,6 +43,10 @@ SLO (objective, error ratio as PromQL)
    - an objective written as a percentage, `99.9` for `0.999`;
    - an objective below 0.931, where the 14.4× page needs an error ratio above 1, more than every request failing.
 
+   It also refuses two SLOs with the same name. Each SLO is a rule group named after it, and Prometheus rejects a
+   file with a group name twice, with every other rule in it: one copied SLO that kept its name switched off all
+   alerting.
+
    For objectives that low (batch jobs, best-effort features), alert on the error ratio directly instead of on burn
    rate.
 3. **Test the rules in CI with promtool** (`promtool check rules`, then `promtool test rules` with synthetic
@@ -86,4 +90,6 @@ ADR: the SLO list with objectives and owners, windows and factors, routing, erro
 - A single window: a long one keeps paging for hours after the fix, and a short one flaps.
 - An average latency SLO: one slow endpoint hides behind fast health checks.
 - Alerts nobody owns, or with no runbook.
+- Copying an SLO definition and keeping its name. Prometheus refuses the whole rule file over the repeated group
+  name, so not one alert in it loads.
 - SLOs for every service, no journeys: dozens of alerts and none that says "customers can't check out".

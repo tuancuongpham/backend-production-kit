@@ -5,6 +5,7 @@
 // in transaction mode, too).
 import type pg from 'pg';
 import { withTransaction } from './pg-transaction.ts';
+import { pgText } from './pg-values.ts';
 
 const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 
@@ -26,9 +27,9 @@ export async function withTenant<T>(pool: pg.Pool, tenantId: string, fn: (client
 export interface HybridSearchParams {
   embedding: number[];
   query: string;
-  /** Final number of results. */
+  /** Final number of results, 1 to 100. Default 10. */
   limit?: number;
-  /** Candidates taken from each retriever before fusion. */
+  /** Candidates taken from each retriever before fusion, 1 to 1,000. Default 50. */
   candidates?: number;
   /** RRF constant; 60 is the value from the original paper and a sane default. */
   rrfK?: number;
@@ -50,6 +51,12 @@ export interface HybridHit {
  * Must run inside withTenant().
  */
 export async function hybridSearch(client: pg.PoolClient, p: HybridSearchParams): Promise<HybridHit[]> {
+  // Often straight from a query string (?limit=…): a negative or fractional limit would be a database error, and a
+  // huge candidate count a scan over the tenant's whole index.
+  const limit = checkedCount(p.limit ?? 10, 'limit', MAX_LIMIT);
+  const candidates = checkedCount(p.candidates ?? 50, 'candidates', MAX_CANDIDATES);
+  const rrfK = p.rrfK ?? 60;
+  if (!(rrfK > 0 && Number.isFinite(rrfK))) throw new RangeError(`hybridSearch: rrfK must be a positive number, got ${rrfK}`);
   // pgvector >= 0.8: keep scanning the HNSW index until enough rows survive the RLS filter.
   // Without this, a small tenant in a big table can get far fewer than `candidates` hits.
   // Only set it where it exists. On pgvector 0.5–0.7 "hnsw." is a reserved prefix once the library is
@@ -102,9 +109,18 @@ export async function hybridSearch(client: pg.PoolClient, p: HybridSearchParams)
      JOIN chunks c USING (id)
      ORDER BY rrf_score DESC
      LIMIT $5`,
-    [vectorParam(p.embedding), p.query, p.candidates ?? 50, p.rrfK ?? 60, p.limit ?? 10],
+    // A NUL in the query (%00 in a URL) would fail the statement; as U+FFFD it is just a word break.
+    [vectorParam(p.embedding), pgText(p.query), candidates, rrfK, limit],
   );
   return rows;
+}
+
+const MAX_LIMIT = 100;
+const MAX_CANDIDATES = 1000;
+
+function checkedCount(n: number, name: string, max: number): number {
+  if (!Number.isInteger(n) || n < 1 || n > max) throw new RangeError(`hybridSearch: ${name} must be an integer from 1 to ${max}, got ${n}`);
+  return n;
 }
 
 /**

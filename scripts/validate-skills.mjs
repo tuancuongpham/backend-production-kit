@@ -106,6 +106,9 @@ for (const name of skills) {
     else if (needed.has(file) && read(copy) !== read(path.join('shared', file))) fail(`${copy}: differs from shared/${file} (edit shared/, then npm run sync:shared)`);
     else if (!needed.has(file) && existsSync(copy)) fail(`${copy}: no longer imported (run npm run sync:shared)`);
   }
+  // An agent copies what SKILL.md tells it to: every kernel file the skill needs must be named there.
+  const guide = read(path.join('skills', name, 'SKILL.md'));
+  for (const file of needed) if (!guide.includes(file)) fail(`skills/${name}/SKILL.md: never mentions ${file}, which its reference code needs`);
 }
 
 if (errors.length) {

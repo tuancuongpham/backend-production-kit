@@ -50,6 +50,8 @@ cron:     tick() on every instance → each fire enqueued exactly once
 2. **Enqueue inside the business transaction.** Call `enqueue(tx, { kind, payload, priority, runAt, maxAttempts,
    dedupKey })` from [references/jobs.ts](references/jobs.ts) with the transaction's client, never a separate
    pool query. Put ids in the payload, not whole objects that will be stale by the time the job runs.
+   `enqueue` refuses an invalid `runAt` (a reminder time parsed from user input), a fractional `priority` and a
+   `maxAttempts` below 1 with a `RangeError`: answer it with 400.
 3. **Handlers.** `createWorker({ pool, queue, handlers: { 'send-email': async (job, { signal }) => … } })`:
    - **safe to run twice**: key effects by `job.id`. A job runs again after a crash, a timeout or a lost lease;
    - pass `signal` to fetch, SDK and DB calls. It aborts at the job timeout, or when the lease was lost and another
@@ -65,7 +67,7 @@ cron:     tick() on every instance → each fire enqueued exactly once
      finish; jobs claimed but not started go back to the queue at once (`released`), their attempt not spent.
    - Leave `batchSize` at 1 unless jobs are tiny. With a batch, one heartbeat renews the lease of every job the
      batch holds, the waiting ones too, so a job queued behind a slow one can't expire and burn an attempt unrun.
-   - Copy `pg-transaction.ts` and `worker-loop.ts` along with `jobs.ts`: they are the kit's shared building blocks,
+   - Copy `hooks.ts`, `pg-transaction.ts`, `pg-values.ts` and `worker-loop.ts` along with `jobs.ts`: they are the kit's shared building blocks,
      identical in every skill that has them.
 5. **Recurring jobs.** Call `createScheduler({ pool, schedules: [{ name, kind, next: every(3_600_000) }] }).tick()`
    every few seconds from every instance.
@@ -130,3 +132,8 @@ dead-letter alert owner.
   `max_attempts` without ever having run.
 - Racing a handler against a timeout without catching the losing promise: its late rejection crashes Node.
 - No retention: the table grows forever. With the wrong indexes, every claim slows down with it.
+- **Trusting a run time built from user input.** `new Date('31/12/2026 09:00')` is an Invalid Date, and Postgres
+  answers with a cryptic syntax error. `enqueue` refuses it, a fractional priority and a non-positive `maxAttempts`
+  with a `RangeError` that says which.
+- **An async `onDead` alert.** If it rejects while the alert service is down, a bare call leaves an unhandled
+  rejection, which ends the process. Hooks go through `callHook`.

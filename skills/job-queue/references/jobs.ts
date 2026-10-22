@@ -2,7 +2,9 @@
 // running (heartbeats), retry with backoff, dead-letter, and fire recurring jobs exactly once per tick.
 // Delivery is at-least-once: a handler must be safe to run twice, so key its effects by job.id.
 import type pg from 'pg';
+import { callHook } from './hooks.ts';
 import { withTransaction } from './pg-transaction.ts';
+import { pgJson, pgText } from './pg-values.ts';
 import { runLoops } from './worker-loop.ts';
 
 // ---------- 1. Enqueue ----------
@@ -25,6 +27,14 @@ export interface NewJob {
  * order and its "send confirmation" job). Returns the job id, or null when dedupKey dropped it as a duplicate.
  */
 export async function enqueue(db: pg.Pool | pg.PoolClient, job: NewJob): Promise<string | null> {
+  // A run time parsed from user input ("remind me at …") can be an Invalid Date: say so, not with a database error.
+  if (job.runAt !== undefined && !(job.runAt instanceof Date && Number.isFinite(job.runAt.getTime()))) {
+    throw new RangeError(`enqueue: runAt must be a valid Date, got ${String(job.runAt)}`);
+  }
+  if (job.priority !== undefined && !Number.isInteger(job.priority)) throw new RangeError(`enqueue: priority must be an integer, got ${job.priority}`);
+  if (job.maxAttempts !== undefined && !(Number.isInteger(job.maxAttempts) && job.maxAttempts >= 1)) {
+    throw new RangeError(`enqueue: maxAttempts must be a positive integer, got ${job.maxAttempts}`);
+  }
   const { rows } = await db.query(
     `INSERT INTO jobs (queue, kind, payload, priority, run_at, status, max_attempts, dedup_key)
      VALUES ($1, $2, $3, $4, COALESCE($5, now()),
@@ -32,7 +42,8 @@ export async function enqueue(db: pg.Pool | pg.PoolClient, job: NewJob): Promise
      ON CONFLICT (queue, dedup_key) WHERE dedup_key IS NOT NULL AND status IN ('scheduled', 'available', 'running')
      DO NOTHING
      RETURNING id`,
-    [job.queue ?? 'default', job.kind, JSON.stringify(job.payload ?? {}), job.priority ?? 0, job.runAt ?? null, job.maxAttempts ?? 8, job.dedupKey ?? null],
+    // A NUL character from user data in the payload or dedup key is stored as U+FFFD (Postgres can't hold it).
+    [job.queue ?? 'default', job.kind, pgJson(job.payload ?? {}), job.priority ?? 0, job.runAt ?? null, job.maxAttempts ?? 8, pgText(job.dedupKey ?? null)],
   );
   return rows[0]?.id ?? null;
 }
@@ -68,7 +79,7 @@ export interface WorkerOptions {
   baseDelayMs?: number; // retry backoff base, default 1 s
   maxDelayMs?: number; // default 1 h
   random?: () => number; // injectable for tests
-  onDead?: (job: Pick<Job, 'id' | 'queue' | 'kind'>, error: unknown) => void; // alert here
+  onDead?: (job: Pick<Job, 'id' | 'queue' | 'kind'>, error: unknown) => unknown; // alert here
 }
 
 export interface RunOptions {
@@ -80,7 +91,7 @@ export interface RunOptions {
   maintainEveryMs?: number;
   /** Abort to stop. run() resolves once every loop has finished the job it is running. */
   signal: AbortSignal;
-  onError?: (err: unknown) => void;
+  onError?: (err: unknown) => unknown;
 }
 
 /** Exponential backoff with "equal jitter": never ~0, never synchronized across jobs. */
@@ -189,7 +200,7 @@ export class JobWorker {
         RETURNING id, queue, kind, status`,
       [batch, this.#baseDelayMs, this.#maxDelayMs],
     );
-    for (const job of rescued.rows) if (job.status === 'dead') this.#onDead?.(job, new Error('lease expired on the last attempt'));
+    for (const job of rescued.rows) if (job.status === 'dead') callHook(this.#onDead, job, new Error('lease expired on the last attempt'));
     const promoted = await this.#pool.query(
       `UPDATE jobs SET status = 'available'
         WHERE id IN (
@@ -288,11 +299,11 @@ export class JobWorker {
               lease_id = NULL, locked_until = NULL, last_error = $4
         WHERE id = $1 AND lease_id = $2
         RETURNING status`,
-      [job.id, job.lease_id, delay, String(err instanceof Error ? err.message : err).slice(0, 2000)],
+      [job.id, job.lease_id, delay, pgText(String(err instanceof Error ? err.message : err).slice(0, 2000))],
     );
     if (!rows[0]) return 'lost';
     if (rows[0].status === 'dead') {
-      this.#onDead?.(job, err);
+      callHook(this.#onDead, job, err); // an alert that fails can't undo the dead letter
       return 'dead';
     }
     return 'retry';

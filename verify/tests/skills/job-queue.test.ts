@@ -109,6 +109,30 @@ describe('job-queue', () => {
     assert.deepEqual(await statusOf(id), { status: 'done', attempts: 2 });
   });
 
+  it("a job claimed by another worker meanwhile aborts the first worker's handler at its next heartbeat", async () => {
+    let reason: unknown;
+    const workerA = createWorker({
+      pool,
+      leaseSec: 0.3, // heartbeat every 100 ms
+      handlers: {
+        report: (_job, { signal }) =>
+          new Promise<void>((_, reject) =>
+            signal.addEventListener('abort', () => {
+              reason = signal.reason;
+              reject(signal.reason as Error);
+            }),
+          ),
+      },
+    });
+    const id = await enqueue(pool, { kind: 'report' });
+    const a = workerA.processOnce();
+    await waitFor(async () => (await statusOf(id)).status === 'running', 'A to start');
+    // Another worker holds the job now: A's lease is no longer the job's lease.
+    await pool.query(`UPDATE jobs SET lease_id = gen_random_uuid() WHERE id = $1`, [id]);
+    assert.deepEqual(await a, ['lost'], "A stops; the other worker's run owns the outcome");
+    assert.match(String(reason), /lease lost/);
+  });
+
   it('a worker frozen past its lease loses the job: it runs elsewhere, and the late finish is discarded', async () => {
     let releaseA!: () => void;
     const gate = new Promise<void>((r) => (releaseA = r));

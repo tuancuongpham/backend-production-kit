@@ -115,8 +115,14 @@ function textOf(value: unknown): string {
   }
 }
 
+/**
+ * Key names whose whole value is a secret, matched by how the name ends, whatever the style: clientSecret,
+ * client_secret, x-auth-token, idToken, proxy-authorization, aws_secret_access_key. Anything with "passw" in it
+ * (newPassword, password_confirmation, passwordHash). A few short names whole (pin, otp, cvv, cvc, sig). Not "tokens"
+ * (inputTokens, max_tokens: counts) and not a bare "key" (cacheKey, sortKey, publicKey).
+ */
 export const defaultSensitiveKeys =
-  /^(pass(word)?|pwd|secret|.*_secret|token|.*_token|access_?token|refresh_?token|authorization|cookie|set-cookie|api_?key|x-api-key|cvv|cvc|otp|pin|private_?key)$/i;
+  /^(?:pin|otp|cvv|cvc|sig)$|passw|pwd$|secret$|token$|credentials?$|signature$|authorization$|cookies?$|(?:api|access|secret|private|signing|encryption|client|master)[_-]?key$/i;
 
 /**
  * The redactor is a plain object of closures, not a class instance: its functions are meant to be passed around
@@ -133,6 +139,10 @@ export function createRedactor(opts: RedactorOptions = {}) {
   const sensitiveKeys = opts.sensitiveKeys ?? defaultSensitiveKeys;
   const maxDepth = opts.maxDepth ?? 8;
   const maxLen = opts.maxStringLength ?? 16 * 1024;
+  // Both bound the work per log line. From an unset environment variable they are NaN, and `length > NaN` never holds:
+  // no truncation, no depth limit.
+  if (!Number.isInteger(maxDepth) || maxDepth < 1) throw new RangeError(`redactor: maxDepth must be a positive integer, got ${maxDepth}`);
+  if (!Number.isInteger(maxLen) || maxLen < 1) throw new RangeError(`redactor: maxStringLength must be a positive integer, got ${maxLen}`);
   // The shortest thing any default detector matches ("pin=1" is 5 chars).
   const minLen = opts.detectors ? 1 : 5;
 
@@ -194,6 +204,13 @@ export function createRedactor(opts: RedactorOptions = {}) {
     }
     if (value instanceof Date) return value;
     if (ArrayBuffer.isView(value)) return `[BINARY ${value.byteLength}B]`;
+    // What JSON (and the logger) would print: a URL's href, a Decimal's digits. Its own fields would show nothing
+    // (a URL has none, so it logged as {}) or internals, and its credentials would never reach the detectors.
+    const toJSON = (value as { toJSON?: unknown }).toJSON;
+    if (typeof toJSON === 'function') {
+      const json: unknown = toJSON.call(value);
+      if (json !== value) return redactValue(json, depth, seen);
+    }
     if (value instanceof Map) return redactValue(Object.fromEntries([...value].map(([k, v]) => [textOf(k), v])), depth, seen);
     if (value instanceof Set) return redactValue([...value], depth, seen);
     if (Array.isArray(value)) return value.map((v) => redactValue(v, depth + 1, seen));

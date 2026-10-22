@@ -9,6 +9,9 @@ Logs and traces are copied everywhere: log vendors, laptops, support tickets, LL
 
 Use two mechanisms together:
 - **Key-based**: values under keys like `password`, `token`, `authorization`, `cookie`, `apiKey` are replaced wholesale. Fast and precise.
+  A key matches by how it ends, whatever the naming style: `clientSecret`, `idToken`, `x-auth-token`,
+  `proxy-authorization`, `aws_secret_access_key`, and anything with "passw" in it (`newPassword`, `passwordHash`).
+  Counts and lookalikes keep their values: `inputTokens`, `max_tokens`, `cacheKey`, `publicKey`.
 - **Pattern-based**: free text is scanned for secrets and personal data. This catches what ends up in messages,
   error strings and LLM prompts:
   - JWTs and bearer tokens;
@@ -76,6 +79,11 @@ ADR: placeholder style and HMAC key handling, which sinks are covered, prompt-st
 - Patterns without boundaries. `\d{12}` eats trace ids and timestamps, and then people turn redaction off.
 - **Unbounded quantifiers.** Logs carry attacker-controlled text. `[A-Za-z0-9._%+-]+@…` scans to the end of the string from every position, so one 50 KB log line without `@` took ~1.9 s to redact: a logging-path denial of service. Bound every quantifier (`{1,64}`, as RFC limits allow), add a cheap `hint` pre-check per detector, and truncate strings above `maxStringLength` (16 KiB by default) before scanning. After the fix the same line takes 0.2 ms, and structured records redact 71% faster (`bench/run.ts`).
 - Merging the detectors into one big regex "for speed". It produced identical output on every fixture but ran 1.3–3.3× slower than per-detector regexes with hints, because the hints skip most detectors on most lines. Dropping the hints is 1.8–4.7× slower ([performance](../../docs/performance.md)).
+- A key list written for one naming style. `^(password|token|.*_secret)$` let `clientSecret`, `newPassword`,
+  `idToken`, `x-auth-token` and `proxy-authorization` through in clear: JavaScript apps name things in camelCase,
+  and headers use dashes. Match how the name ends.
+- Redacting an object by its own fields when the logger prints its `toJSON()`. A `URL` has no own fields, so it was
+  logged as `{}`, and its `user:password` never reached the detectors.
 - Logging `req.body` "temporarily". If it happens anyway, the JSON detector catches `"password": "…"` in the raw
   text, but nothing catches a field you didn't think of.
 - A pre-check (`hint`) stricter than its pattern. It looks like an optimization and silently disables the

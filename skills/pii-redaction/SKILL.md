@@ -9,7 +9,17 @@ Logs and traces are copied everywhere: log vendors, laptops, support tickets, LL
 
 Use two mechanisms together:
 - **Key-based**: values under keys like `password`, `token`, `authorization`, `cookie`, `apiKey` are replaced wholesale. Fast and precise.
-- **Pattern-based**: free text is scanned for emails, phones, national IDs, cards (Luhn-checked), JWTs, bearer tokens and API keys. This catches PII that ends up in messages, error strings and LLM prompts.
+- **Pattern-based**: free text is scanned for secrets and personal data. This catches what ends up in messages,
+  error strings and LLM prompts:
+  - JWTs and bearer tokens;
+  - credentials in connection strings (`postgres://app:[URL_CREDENTIALS]@db`);
+  - secret-named values in query strings, env dumps and raw JSON (`access_token=`, `X-Amz-Signature=`,
+    `DB_PASSWORD=`, `"password": "…"`);
+  - Stripe, GitHub, AWS, Google and Slack keys;
+  - emails in any script (`nguyễn@ví-dụ.vn`);
+  - cards (Luhn-checked);
+  - CCCD, and CMND after its label;
+  - Vietnamese phones written any way people write them (`(+84) 901 234 567`, `09 01 23 45 67`).
 
 ## Decision points: ask before coding
 
@@ -32,6 +42,8 @@ Use two mechanisms together:
    - **Audit logs**: keep actor ids and actions, redact free text.
 3. **Seed the fixture table** with the formats your users actually type: with/without separators, `+84`, emails with `+tag`, cards with spaces. Add false-positive guards too: order ids, timestamps, trace ids, version numbers.
    Custom detectors are checked when the redactor is created: the `pattern` must be global (without `g`, `replace` stops after the first match and the second email in a line leaks), and a `hint` must not be (`test()` on a global regex resumes at `lastIndex` and skips every other string).
+   A `hint` must accept everything its pattern does. The number detectors share one that asks for nine digits
+   grouped any way. The earlier "three digits in a row" skipped `09 01 23 45 67` entirely.
 4. Add a **CI guard**: one test that runs a realistic log line through the configured logger (not just the redactor) and asserts no raw value appears in the output.
 
 ## Verification (required)
@@ -39,6 +51,11 @@ Use two mechanisms together:
 [verify/tests/skills/pii-redaction.test.ts](../../verify/tests/skills/pii-redaction.test.ts) is the template:
 - Every fixture in "redacts" becomes its placeholder; every fixture in "keeps" is unchanged (Luhn and digit-boundary guards work).
 - Sensitive keys are replaced at any depth; arrays, `Error` objects (message **and** stack), cycles and deep nesting are handled without throwing; input objects are not mutated.
+- Logging never throws:
+  - an ORM entity whose lazy relation throws when read gets `[UNREADABLE]` for that property only;
+  - a proxy, a `Map` with object keys, or a library error with a non-string message is handled the same way.
+- An error keeps its `code`, its `cause` and a redacted `detail` (`Key (email)=([EMAIL]) already exists`), never
+  the rest of its properties. An HTTP client's error carries the request config, Authorization header included.
 - HMAC placeholders are stable for the same value and differ for different values.
 - The real logger configuration (pino hooks) redacts both merged objects and message strings.
 - A custom detector without the `g` flag, or a hint with it, is refused at startup ([regressions/round-3.test.ts](../../verify/tests/regressions/round-3.test.ts)).
@@ -52,5 +69,12 @@ ADR: placeholder style and HMAC key handling, which sinks are covered, prompt-st
 - Patterns without boundaries. `\d{12}` eats trace ids and timestamps, and then people turn redaction off.
 - **Unbounded quantifiers.** Logs carry attacker-controlled text. `[A-Za-z0-9._%+-]+@…` scans to the end of the string from every position, so one 50 KB log line without `@` took ~1.9 s to redact: a logging-path denial of service. Bound every quantifier (`{1,64}`, as RFC limits allow), add a cheap `hint` pre-check per detector, and truncate strings above `maxStringLength` (16 KiB by default) before scanning. After the fix the same line takes 0.2 ms, and structured records redact 71% faster (`bench/run.ts`).
 - Merging the detectors into one big regex "for speed". It produced identical output on every fixture but ran 1.3–3.3× slower than per-detector regexes with hints, because the hints skip most detectors on most lines. Dropping the hints is 1.8–4.7× slower ([performance](../../docs/performance.md)).
-- Logging `req.body` "temporarily".
+- Logging `req.body` "temporarily". If it happens anyway, the JSON detector catches `"password": "…"` in the raw
+  text, but nothing catches a field you didn't think of.
+- A pre-check (`hint`) stricter than its pattern. It looks like an optimization and silently disables the
+  detector for every format it doesn't accept.
+- Unanchored email matching on long runs of letters: retrying at every character cost 50 ms per 16 KiB line. A
+  match starts only where a run of address characters starts.
+- Truncating a long line with `slice(0, n)`: a cut inside an emoji leaves half of it, invalid text for the log
+  pipeline. The redactor and the trace helpers cut between characters (`toWellFormed()`).
 - Treating redaction as encryption. It is lossy on purpose; keep raw data in the database under access control, not in logs.

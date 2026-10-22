@@ -1,25 +1,25 @@
 {
   "name": "redaction",
-  "date": "2026-10-21T19:51:06.849Z",
+  "date": "2026-10-22T15:27:19.640Z",
   "node": "v24.16.0",
   "rows": [
     {
       "workload": "typical log lines",
-      "A. hints (shipped) /s": 1454888,
-      "B. no hints /s": 807722,
-      "C. single pass /s": 1081264
+      "A. hints (shipped) /s": 1592328,
+      "B. no hints /s": 628414,
+      "C. single pass /s": 603487
     },
     {
       "workload": "no PII, no digits",
-      "A. hints (shipped) /s": 5731081,
-      "B. no hints /s": 1222583,
-      "C. single pass /s": 3456237
+      "A. hints (shipped) /s": 4289760,
+      "B. no hints /s": 1043127,
+      "C. single pass /s": 2069938
     },
     {
       "workload": "PII-heavy (2 KB, 20 values)",
-      "A. hints (shipped) /s": 114723,
-      "B. no hints /s": 49036,
-      "C. single pass /s": 34320
+      "A. hints (shipped) /s": 112721,
+      "B. no hints /s": 71095,
+      "C. single pass /s": 38912
     }
   ],
   "mismatches": 0,

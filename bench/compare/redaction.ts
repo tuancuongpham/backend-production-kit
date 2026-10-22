@@ -8,15 +8,13 @@ import { save, table } from './lib.ts';
 
 const A = createRedactor();
 const B = createRedactor({ detectors: defaultDetectors.map(({ hint: _hint, ...d }) => d) });
-// C: BEARER is the only case-insensitive detector; spell its keyword case-insensitively so one flag set fits all.
-const parts = defaultDetectors.map((d) => [
-  d.name,
-  d.name === 'BEARER' ? String.raw`\b(?:[Bb][Ee][Aa][Rr][Ee][Rr]|[Bb][Aa][Ss][Ii][Cc])\s{1,8}[A-Za-z0-9._~+/-]{8,4096}={0,2}` : d.pattern.source,
-]);
-const combined = new RegExp(parts.map(([n, s]) => `(?<${n}>${s})`).join('|'), 'g');
+// C: one regex needs one set of flags. It takes u (the email and id detectors match letters of any script), and the
+// case-insensitive detectors keep that inside a modifier group, (?i:…).
+const parts = defaultDetectors.map((d) => [d.name, d.pattern.flags.includes('i') ? `(?i:${d.pattern.source})` : d.pattern.source]);
+const combined = new RegExp(parts.map(([n, s]) => `(?<${n}>${s})`).join('|'), 'gu');
 const C = {
   redactString(s: string) {
-    if (s.length < 6) return s;
+    if (s.length < 5) return s;
     return s.replace(combined, (m, ...args) => {
       const groups = args.at(-1) as Record<string, string | undefined>;
       for (const [n] of parts) if (groups[n] !== undefined) return n === 'CARD' && !luhnValid(m) ? m : `[${n}]`;

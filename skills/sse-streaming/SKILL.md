@@ -51,6 +51,14 @@ Reference: [references/sse.ts](references/sse.ts), with `hooks.ts`, the kit's sh
 - A stalled client (never reads) makes `trySend` refuse, and the buffered bytes stay bounded.
 - A stalled feed subscriber is disconnected once it is `maxQueue` events behind, instead of buffering every event ([regressions/round-2.test.ts](../../verify/tests/regressions/round-2.test.ts)).
 - `closeOn` ends a stream cleanly when it fires, and a stream that ended first leaves no listener on the signal.
+- [The assistant journey](../../verify/tests/journeys/assistant-stream.test.ts) reads every stream as the browser
+  reads it ([support/sse-parser.ts](../../verify/tests/support/sse-parser.ts)) and covers:
+  - a whole answer in Vietnamese, with emoji and paragraph breaks;
+  - a tab closed after the first words: the model call is cancelled, with no error logged;
+  - a model failing halfway: the stream ends with `failed`;
+  - a feed that reconnects after losing the network: the missed events arrive once, in order;
+  - a deploy: the stream ends once traffic has moved, and the feed resumes on the new instance;
+  - a `Last-Event-ID` nobody issued: `reset`.
 
 Manually: throttle the network in browser devtools and toggle offline; the UI should resume without duplicate or missing tokens. Behind the real proxy or CDN, confirm tokens arrive incrementally rather than all at once at the end (a buffering proxy).
 

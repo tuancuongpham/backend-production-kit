@@ -109,6 +109,12 @@ Against real Postgres. [verify/tests/skills/llm-tool-safety.test.ts](../../verif
   - a result holding a BigInt is stored and replayed (as a string);
   - a pattern with the `m` flag still matches the whole value, not one line of it;
   - a tool-call id longer than an index entry still gets its result.
+- [The agent approval journey](../../verify/tests/journeys/agent-approvals.test.ts) runs over HTTP, as the agent
+  runtime and the approval page call it:
+  - an email with an injected instruction, then a refund held for a human;
+  - a supervisor approves from the link, the refund runs once, and a repeated retry replays it;
+  - a raised amount, made-up ids, links edited by hand, another shop's supervisor, a decision the API doesn't know,
+    and the requester approving their own destructive call: each refused, with nothing run.
 
 How to write these tests so they prove something:
 - Script the model: feed a tool result containing an injected instruction, then make the next call follow it. The

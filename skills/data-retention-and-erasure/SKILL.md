@@ -106,6 +106,8 @@ stores and how each is erased, backup policy.
   completed it and cleared the subject id, and the request then retried forever with nobody to erase.
 - No retention: data kept "just in case" is data you must find, export and erase later.
 - Forgetting the operational tables that hold the subject's id: idempotency keys (their `scope`), job payloads,
-  outbox events, the webhook inbox, audit logs. Inventory each one with its retention.
+  outbox events, the webhook inbox, audit logs. Inventory each one with its retention. The deletion request's own
+  idempotency key keeps the id until it expires (24 h by default), so that a retried tap still gets its answer
+  ([journey](../../verify/tests/journeys/data-rights.test.ts)).
 - Erasing a cached copy by letting it expire. Until then the deleted person's profile is still served; list the
   cache as an external store whose `erase` invalidates the key.

@@ -58,6 +58,9 @@ The full go-live list is in [references/checklist.md](references/checklist.md).
 - A client that disconnects mid-upload fails `readBody` at once; `deadline(ms, ctx.signal)` aborts on whichever
   comes first.
 - `installSignalHandlers`: SIGTERM drains then exits 0, a second signal exits 1 at once, a failing shutdown exits 1.
+- The [journeys](../../verify/tests/journeys) run the hardened server as real applications do:
+  - a shopper's payment cut off by a deploy is retried on the new instance and never creates a second order;
+  - a live feed open during a deploy ends once traffic has moved.
 - `maxInFlight: 2` with 5 concurrent → exactly two 200s and three 503s, and the 503s are immediate (< 150 ms).
 - Client abort → the handler's signal fires, with the request id preserved.
 - Handler throws → 500, the server keeps serving; oversize body → 413; malformed incoming request ids are replaced.

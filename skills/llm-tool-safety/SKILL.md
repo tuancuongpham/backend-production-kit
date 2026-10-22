@@ -104,6 +104,11 @@ Against real Postgres. [verify/tests/skills/llm-tool-safety.test.ts](../../verif
   - an unanchored pattern refuses `o-1'; DROP TABLE refunds; --`;
   - made-up and hand-edited approval ids are unknown approvals;
   - a result cut mid-emoji is stored, and the retry replays it.
+- [regressions/round-5.test.ts](../../verify/tests/regressions/round-5.test.ts):
+  - a result that can't be recorded keeps the call claimed: the tool ran once, and the retry is held;
+  - a result holding a BigInt is stored and replayed (as a string);
+  - a pattern with the `m` flag still matches the whole value, not one line of it;
+  - a tool-call id longer than an index entry still gets its result.
 
 How to write these tests so they prove something:
 - Script the model: feed a tool result containing an injected instruction, then make the next call follow it. The

@@ -4,6 +4,17 @@ import pg from 'pg';
 
 export const ADMIN_URL = process.env.KIT_PG_URL ?? 'postgres://kit:kit@localhost:55439/kit';
 export const REDIS_URL = process.env.KIT_REDIS_URL ?? 'redis://localhost:63799';
+/** Toxiproxy (resilience tests): its API, and the host ports its proxies to postgres and redis listen on. */
+export const TOXIPROXY_URL = process.env.KIT_TOXIPROXY_URL ?? 'http://localhost:58474';
+export const TOXI_PG_PORT = 55440;
+export const TOXI_REDIS_PORT = 63800;
+
+/** The same database URL, reached through another port (a Toxiproxy proxy). */
+export function viaPort(dbUrl: string, port: number): string {
+  const url = new URL(dbUrl);
+  url.port = String(port);
+  return url.toString();
+}
 
 const kitRoot = fileURLToPath(new URL('../../', import.meta.url));
 

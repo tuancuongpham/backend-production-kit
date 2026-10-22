@@ -25,6 +25,7 @@ LLM *token or cost* budgets are a separate concern; see the `llm-gateway` skill.
 1. **Lua script.** [references/token-bucket.lua](references/token-bucket.lua) does read, refill, take and expire atomically. It uses `redis.call('TIME')` so app servers' clock skew doesn't matter, and idle keys expire on their own.
 2. **Client.** [references/limiter.ts](references/limiter.ts):
    - configure ioredis with `enableOfflineQueue: false`, `maxRetriesPerRequest: 1`, `commandTimeout: 50`. Otherwise commands **queue while disconnected** and requests hang;
+   - with the offline queue off, a command sent before the connection is ready fails at once. Connect (`lazyConnect: true`, then `await redis.connect()`) before the instance reports ready, or the first requests after every deploy run in the failure mode;
    - `timeoutMs` races each check, and the losing promise is caught so a late rejection can't crash Node;
    - the circuit breaker stops calling Redis after N consecutive failures for a cooldown, so a dead Redis costs 0 ms instead of 50 ms per request;
    - `local` mode keeps a per-instance bucket of `capacity / instances`. That is approximate, but still bounded;
@@ -47,6 +48,7 @@ LLM *token or cost* budgets are a separate concern; see the `llm-gateway` skill.
 - **Slow Redis** (server blocked by a busy script): the check falls back within `timeoutMs`, and *no unhandled rejection* surfaces afterwards. This test catches the classic `Promise.race` crash; it fails without the `.catch`.
 - **Redis down**: `closed` → denied in < 300 ms; `open` → allowed; `local` → enforces `capacity / instances`.
 - Breaker: after the threshold, Redis isn't called any more.
+- Through Toxiproxy, Redis 300 ms slow against `timeoutMs: 50` → the check falls back to `local` in under 150 ms, and is back on `redis` once the latency is gone ([resilience-testing.test.ts](../../verify/tests/resilience-testing.test.ts)).
 - Config: `refillPerSec: 0`, `capacity: 0` and `NaN` are rejected at startup. With refill 0 the Lua script itself errors on every call ([latent-bugs-round2.test.ts](../../verify/tests/latent-bugs-round2.test.ts)).
 
 Before launch, load-test the real endpoint (k6/autocannon) to confirm limiter latency at p99 and that 429s don't cascade into client retry storms.
@@ -56,6 +58,7 @@ ADR: failure mode per endpoint class (with the reason), subject choice, limits p
 
 ## Common mistakes
 - Default ioredis options: an offline queue plus 20 retries means requests hang for seconds during a Redis outage.
+- Turning the offline queue off without connecting first: until the connection is up, every check fails into the failure mode.
 - `GET` then `SET` from the app: races let bursts through. It must be one atomic script.
 - Using app-server `Date.now()` inside distributed state: clock skew equals free tokens.
 - Trusting `X-Forwarded-For` from anyone: attackers rotate it and get unlimited buckets.

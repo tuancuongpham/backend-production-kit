@@ -100,6 +100,9 @@ export function createRelay(o: RelayOptions) {
       const published: string[] = [];
       let failure: { id: string; error: string } | undefined;
       for (const msg of rows) {
+        // The connection died while we were publishing: stop now. The marks can't commit anyway, and every
+        // further publish would only be sent again on the next run.
+        if (lost) throw lost;
         try {
           await publishWithTimeout(msg);
         } catch (err) {

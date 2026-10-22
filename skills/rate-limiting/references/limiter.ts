@@ -1,7 +1,8 @@
 // Distributed token-bucket rate limiter on Redis, with an explicit, tested policy for
 // when Redis is slow or down. Redis client should be created with:
-//   new Redis(url, { enableOfflineQueue: false, maxRetriesPerRequest: 1, commandTimeout: 50 })
-// so commands fail fast instead of queueing while disconnected.
+//   new Redis(url, { enableOfflineQueue: false, maxRetriesPerRequest: 1, commandTimeout: 50, lazyConnect: true })
+// so commands fail fast instead of queueing while disconnected, and `await redis.connect()` before the
+// instance reports ready: without the queue, commands sent before the connection is up fail too.
 import { createHash } from 'node:crypto';
 import { readFileSync } from 'node:fs';
 import type { Redis } from 'ioredis';

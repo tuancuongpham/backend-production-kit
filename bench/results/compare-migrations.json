@@ -1,0 +1,60 @@
+{
+  "name": "migrations",
+  "date": "2026-10-22T07:45:07.735Z",
+  "node": "v24.22.1",
+  "rows": 1000000,
+  "results": [
+    {
+      "change": "add a column while a 1 s report runs",
+      "variant": "ALTER TABLE, no lock_timeout",
+      "change took, ms": 1055,
+      "a read arriving meanwhile waited, ms": 1005
+    },
+    {
+      "change": "add a column while a 1 s report runs",
+      "variant": "runStep, lock_timeout 100 ms + retry",
+      "change took, ms": 1616,
+      "a read arriving meanwhile waited, ms": 52
+    },
+    {
+      "change": "index on email",
+      "variant": "CREATE INDEX",
+      "change took, ms": 1563,
+      "an insert arriving meanwhile waited, ms": 1524
+    },
+    {
+      "change": "index on email",
+      "variant": "CREATE INDEX CONCURRENTLY",
+      "change took, ms": 1736,
+      "an insert arriving meanwhile waited, ms": 2
+    },
+    {
+      "change": "plan NOT NULL",
+      "variant": "SET NOT NULL (full scan under ACCESS EXCLUSIVE)",
+      "change took, ms": 58,
+      "an insert arriving meanwhile waited, ms": 18,
+      "longest exclusive lock, ms": 58
+    },
+    {
+      "change": "plan NOT NULL",
+      "variant": "CHECK NOT VALID (2 ms) → VALIDATE (41 ms, writes allowed) → SET NOT NULL",
+      "change took, ms": 44,
+      "an insert arriving meanwhile waited, ms": 2,
+      "longest exclusive lock, ms": 2
+    },
+    {
+      "change": "add a column with a default",
+      "variant": "DEFAULT now() (stable: stored once in the catalog)",
+      "change took, ms": 1,
+      "an insert arriving meanwhile waited, ms": 2,
+      "longest exclusive lock, ms": 1
+    },
+    {
+      "change": "add a column with a default",
+      "variant": "DEFAULT gen_random_uuid() (volatile: rewrites every row)",
+      "change took, ms": 3850,
+      "an insert arriving meanwhile waited, ms": 3786,
+      "longest exclusive lock, ms": 3850
+    }
+  ]
+}

@@ -2,8 +2,8 @@
 
 Two kinds of measurements:
 
-- **Approach comparisons** (`bench/compare/`, 0.3.0). For each hot path, the realistic alternatives run side by
-  side on the same data. The skill now ships the winner; the tables show by how much it won and what was traded.
+- **Approach comparisons** (`bench/compare/`, since 0.3.0). For each hot path, the realistic alternatives run side
+  by side on the same data. The skill now ships the winner; the tables show by how much it won and what was traded.
 - **Before/after** the 0.2.0 fixes (`node bench/run.ts`), at the end.
 
 ## How these were measured
@@ -32,7 +32,7 @@ already sets `TCP_NODELAY` on its own socket, and the same queries inside the ne
 wrong conclusion. The first semantic-cache run said the new lookups were 40 ms slower, but only because their probe
 vector was a 31 KB text parameter. Linux hosts and real deployments don't have this artifact.
 
-## Approach comparisons (0.3.0)
+## Approach comparisons
 
 ### Semantic cache lookup · `llm-gateway`
 
@@ -289,6 +289,83 @@ A and C produced identical output on all 66 inputs.
 
 **Shipped:** unchanged, measured. The cheap hints skip most detectors on most lines, which a single combined
 pattern can't do.
+
+### Schema changes on a live table · `zero-downtime-migrations`
+
+A 1,000,000-row table that the app keeps reading and writing. A probe query arrives while each change runs, and the
+table shows how long it waited ([`migrations.ts`](../bench/compare/migrations.ts)):
+
+| Change | Variant | Change took | Probe waited | Longest exclusive lock |
+|---|---|---|---|---|
+| add a column while a 1 s report runs | `ALTER TABLE`, no `lock_timeout` | 1,055 ms | read: **1,005 ms** | — |
+| | `runStep`: `lock_timeout` 100 ms + retry | 1,616 ms | read: **52 ms** | — |
+| index on `email` | `CREATE INDEX` | 1,563 ms | insert: **1,524 ms** | — |
+| | `CREATE INDEX CONCURRENTLY` | 1,736 ms | insert: **2 ms** | — |
+| `NOT NULL` on `plan` | `SET NOT NULL` (full scan under `ACCESS EXCLUSIVE`) | 58 ms | insert: 18 ms | 58 ms |
+| | `CHECK … NOT VALID` (2 ms) → `VALIDATE` (41 ms, writes allowed) → `SET NOT NULL` | 44 ms | insert: 2 ms | **2 ms** |
+| add a column with a default | `DEFAULT now()` (stable: stored once in the catalog) | 1 ms | insert: 2 ms | 1 ms |
+| | `DEFAULT gen_random_uuid()` (volatile: rewrites every row) | 3,850 ms | insert: **3,786 ms** | **3,850 ms** |
+
+- **The lock queue.** The `ALTER` itself is instant, but it waits for the report's lock, and every query that
+  arrives after it queues behind it, reads included. Without `lock_timeout` a 1 s report became a 1 s stall for
+  the whole app. With it, the `ALTER` gives up after 100 ms, the queue drains, and `runStep` retries until the
+  report is done. The change takes longer and nobody notices.
+- **Index builds.** `CREATE INDEX` blocks writes for the whole build; `CONCURRENTLY` takes 11% longer and blocks
+  nothing.
+- **`NOT NULL`.** The direct `SET NOT NULL` scans the table under the strongest lock: 58 ms here, growing with the
+  table. A validated `CHECK (col IS NOT NULL)` lets Postgres skip that scan, and `VALIDATE` scans while writes
+  continue.
+- **Defaults.** A stable default is stored once in the catalog. A volatile one rewrites all 1M rows under an
+  exclusive lock. `lintMigration` flags it.
+
+**Shipped:** `runStep`, `backfill` and `lintMigration`, with the safe form of each change in
+[patterns.md](../skills/zero-downtime-migrations/references/patterns.md).
+
+### A hot key expiring under load · `cache-stampede`
+
+Four app instances, each with its own Redis client, get 50 requests each for one key at the same moment. The origin
+takes 100 ms ([`cache-stampede.ts`](../bench/compare/cache-stampede.ts)):
+
+| Variant | Origin calls | p50 | p95 |
+|---|---|---|---|
+| A. cache-aside: `GET`, on a miss load and `SET` | **200** | 141 ms | 141 ms |
+| B. A + single-flight inside each process | 4 | 101 ms | 102 ms |
+| C. shipped: single-flight + a Redis lock across instances | **1** | 105 ms | 105 ms |
+| C, with the entry stale rather than gone | 1, in the background | **0.69 ms** | 0.74 ms |
+
+The origin here is a fixed 100 ms sleep, so A's latency understates its cost. In production, 200 copies of the same
+heavy query at once are what saturate the database, and each of them then takes longer. B removes most of the
+duplicate work. C makes it one call however many instances run; the instances without the lock poll for the value,
+which costs about 4 ms. When the entry is stale rather than gone, nobody waits at all.
+
+**Shipped:** C. `staleSec` defaults to the TTL, so a hot key is refreshed while its old value is still served.
+
+### The keyword side of hybrid search · `multitenant-postgres`, `rag-evals`
+
+The `rag-evals` harness ran against `hybridSearch` on a 12-chunk Vietnamese help center. The golden set has 12
+search-box queries ("thanh toán MoMo") and 10 questions asking for the same things in full sentences ("làm sao để
+thanh toán qua vnpay?"). Query embeddings are noise here (no embedding model), so the keyword side carries
+retrieval and its differences show ([`rag-evals.ts`](../bench/compare/rag-evals.ts)):
+
+| Keyword side | Search-box recall@5 | Search-box MRR | Questions recall@5 | Questions MRR |
+|---|---|---|---|---|
+| keyword alone, every word must match | 1.00 | 1.00 | **0.00** | 0.00 |
+| keyword alone, any word | 1.00 | 0.96 | 1.00 | 1.00 |
+| keyword alone, every word, else any | 1.00 | 1.00 | 1.00 | 1.00 |
+| hybrid, every word (0.3.0) | 1.00 | 1.00 | 0.50 | 0.24 |
+| hybrid, any word | 1.00 | **0.74** | 1.00 | 0.63 |
+| hybrid, every word, else any (shipped) | 1.00 | 1.00 | **1.00** | 0.63 |
+
+A question carries words the answer doesn't ("làm sao", "để", "qua"), so requiring every word matched nothing.
+Matching any word fixes questions but ranks search-box queries worse in hybrid search, because chunks that share a
+single common word now compete. The fallback keeps the strict match whenever it finds something, and relaxes only
+when it finds nothing. It is still one statement and one round trip.
+
+The same harness works as a CI gate. Dropping `kit_unaccent` from the query side, a plausible refactor, took
+recall@5 from 1.00 to 0.42 and MRR from 1.00 to 0.25. The slices show where: accented queries fell to 0.30, while
+unaccented ones stayed at 1.00. `compareReports` failed the gate and listed the 7 queries that broke.
+
+**Shipped:** the fallback in `hybridSearch`.
 
 ## Before/after 0.2.0
 

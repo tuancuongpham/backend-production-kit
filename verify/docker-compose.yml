@@ -24,3 +24,12 @@ services:
       interval: 2s
       timeout: 3s
       retries: 20
+
+  # Fault injection (resilience-testing): tests create proxies to postgres:5432 and redis:6379 on the ports below
+  # and add latency, resets or black holes through the API.
+  toxiproxy:
+    image: ghcr.io/shopify/toxiproxy:2.9.0
+    ports:
+      - "58474:8474"   # API
+      - "55440:55440"  # → postgres
+      - "63800:63800"  # → redis

@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 0.4.0 — 2026-10-22
 
 ### New skill: `job-queue`
 Background jobs on Postgres. A job is enqueued in the business transaction and claimed with SKIP LOCKED. While it
@@ -13,6 +13,87 @@ exactly once across instances; `run()` stops gracefully, and finished jobs are p
 - Benchmarked three table designs next to 1,000,000 finished jobs and 100,000 delayed ones. An idle poll costs
   73 ms with an index on `run_at`, 3.4 ms with one `pending` state, and 0.3 ms with the shipped separate
   `scheduled` and `available` states.
+
+### New skill: `zero-downtime-migrations`
+Change a live schema without stalling the app.
+- `runStep` runs each step under `lock_timeout`, retries when the lock isn't granted, and drops the `INVALID`
+  index a failed `CREATE INDEX CONCURRENTLY` leaves behind.
+- `backfill` updates in short batches and resumes where an interrupted run stopped.
+- `lintMigration` flags statements that lock the table or break the version of the app still running.
+- `patterns.md` has the expand/contract recipes, including the RLS retrofit for `multitenant-postgres`.
+- 7 tests against real Postgres, including a DDL statement queued behind a long transaction, an insert during an
+  index build, and `SET NOT NULL` shown to skip its scan after a validated `CHECK`.
+- Benchmarked on a 1M-row table: a read behind a blocked `ALTER` waited 52 ms instead of 1 s, and an insert during
+  an index build waited 2 ms instead of 1.5 s.
+
+### New skill: `cache-stampede`
+A Redis read-through cache that holds when a hot key expires: single-flight per process, a Redis lock across
+instances, stale-while-revalidate, jittered TTLs, cached misses, tenant-scoped keys, and failing open when Redis is
+down.
+- 8 tests against real Redis, including three instances missing at once (one origin call), an instance that died
+  holding the lock, and an origin outage while a stale value is served.
+- Benchmarked with 4 instances × 50 requests: 1 origin call instead of 200 with plain cache-aside, and 0.7 ms
+  instead of 141 ms while the entry is stale.
+
+### New skill: `llm-tool-safety`
+Guardrails for the tools an agent can call.
+- Tools have tiers (read, write, destructive) and strict argument schemas. The tenant comes from the session.
+- Once untrusted content is in the context, writes need a human approval bound to the exact arguments, single-use
+  and expiring. Destructive tools always need one, optionally from a second person.
+- Calls run once per `tool_call_id`, and every call is audited.
+- 7 tests against real Postgres, including a poisoned document that asks for a refund and a deletion: nothing runs.
+
+### New skill: `rag-evals`
+Retrieval metrics (recall@k, MRR, nDCG, hit rate) with slices, a CI gate that lists the queries that broke, and an
+LLM-judge harness whose agreement with human labels is measured before its scores are trusted.
+- 4 tests, including the gate catching a real regression in `hybridSearch`, and a judge with 83% accuracy that
+  still passed a false claim (kappa 0.57).
+
+### New skill: `data-retention-and-erasure`
+One inventory of where each person's data lives drives four things:
+- erasure: every table in one transaction, external stores retried until done, and a durable request record that
+  keeps only a peppered hash once complete;
+- access exports;
+- batched retention;
+- a CI audit for personal columns nobody classified, Vietnamese column names included.
+
+6 tests against real Postgres and Redis. After an erasure, a scan of every text column finds none of the person's
+identifiers, and invoice amounts are kept.
+
+### New skill: `resilience-testing`
+Toxiproxy between the app and its dependencies, a small client to add latency, black holes, resets and outages from
+tests, and a scenario catalog with the expected behaviour per fault. Toxiproxy now runs in the verify stack and in
+CI. 6 tests run the kit's own reference code through it, and found:
+- a server-side `statement_timeout` doesn't bound a slow network; a client-side `query_timeout` does;
+- a pool without `connectionTimeoutMillis` waits forever for a black-holed database;
+- an ioredis client without its offline queue fails every command until it has connected;
+- the outbox relay bug below.
+
+### New skill: `slo-alerting`
+SLOs as code. `prometheusRules` generates recording rules and multi-window, multi-burn-rate alerts, `promtool`
+checks and unit-tests them in CI, and a simulator shows what an incident would trigger.
+- 5 tests: a 10% error rate pages in 9 minutes; a 0.2% slow burn opens a ticket after 36 hours and never pages;
+  normal noise triggers nothing; Prometheus itself fires and resolves the generated rules as designed.
+
+### Fixed
+- `multitenant-postgres`: the keyword side of `hybridSearch` required every word of the query, so questions typed
+  as sentences matched nothing there (0 of 10 in the eval). It now falls back to any word when nothing matches every
+  word: 10 of 10, with search-box ranking unchanged.
+- `outbox-pattern`: when the database connection died mid-batch, the relay kept publishing the rest of the batch,
+  and all of it went out again on the next run. It now stops before the next publish.
+- `rate-limiting`, `cache-stampede` and the service-hardening checklist now say to connect Redis before reporting
+  ready when the offline queue is off. The checklist also requires `connectionTimeoutMillis` and a client-side
+  `query_timeout` on Postgres pools.
+
+### Docs
+- README: an "Incidents it is tested against" table, and the new comparisons.
+- `docs/performance.md`: schema changes on a live table, a hot key expiring under load, the keyword side of hybrid
+  search.
+- `docs/roadmap.md`: all nine ranked candidates are built.
+
+### CI/CD
+- Toxiproxy runs as a service in the CI and release jobs. The SLO test runs `promtool` from the official
+  Prometheus image.
 
 ## 0.3.0 — 2026-10-21
 

@@ -34,9 +34,16 @@ jobs:
           --health-interval 2s
           --health-timeout 3s
           --health-retries 20
+      toxiproxy:
+        image: ghcr.io/shopify/toxiproxy:2.9.0
+        ports:
+          - 8474:8474
+          - 55440:55440
+          - 63800:63800
     env:
       KIT_PG_URL: postgres://kit:kit@localhost:5432/kit
       KIT_REDIS_URL: redis://localhost:6379
+      KIT_TOXIPROXY_URL: http://localhost:8474
     steps:
       - uses: actions/checkout@v5
 

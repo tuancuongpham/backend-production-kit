@@ -1,0 +1,153 @@
+{
+  "name": "rag-evals",
+  "date": "2026-10-22T08:02:22.555Z",
+  "node": "v24.22.1",
+  "chunks": 12,
+  "keywordQueries": 12,
+  "questionQueries": 10,
+  "regression": [
+    {
+      "run": "hybrid search (shipped)",
+      "recall@5": 1,
+      "MRR": 1,
+      "recall, accented": 1,
+      "recall, unaccented": 1
+    },
+    {
+      "run": "same, kit_unaccent dropped from the query",
+      "recall@5": 0.417,
+      "MRR": 0.253,
+      "recall, accented": 0.3,
+      "recall, unaccented": 1
+    }
+  ],
+  "gate": {
+    "pass": false,
+    "failures": [
+      "recall@5 fell by 0.583",
+      "MRR fell by 0.747",
+      "recall in \"accents\" fell by 0.7"
+    ],
+    "deltas": {
+      "recall": -0.583,
+      "mrr": -0.747,
+      "ndcg": -0.707
+    },
+    "regressed": [
+      {
+        "id": "q1",
+        "query": "thanh toán MoMo",
+        "was": 1,
+        "now": 0,
+        "missed": [
+          "pay-momo"
+        ]
+      },
+      {
+        "id": "q3",
+        "query": "hoàn tiền",
+        "was": 1,
+        "now": 0,
+        "missed": [
+          "refund-time"
+        ]
+      },
+      {
+        "id": "q5",
+        "query": "phí vận chuyển",
+        "was": 1,
+        "now": 0,
+        "missed": [
+          "shipping-fee"
+        ]
+      },
+      {
+        "id": "q7",
+        "query": "hủy đơn hàng",
+        "was": 1,
+        "now": 0,
+        "missed": [
+          "cancel"
+        ]
+      },
+      {
+        "id": "q8",
+        "query": "hóa đơn VAT",
+        "was": 1,
+        "now": 0,
+        "missed": [
+          "invoice"
+        ]
+      },
+      {
+        "id": "q9",
+        "query": "đổi số điện thoại",
+        "was": 1,
+        "now": 0,
+        "missed": [
+          "phone"
+        ]
+      },
+      {
+        "id": "q10",
+        "query": "giờ làm việc",
+        "was": 1,
+        "now": 0,
+        "missed": [
+          "hours"
+        ]
+      }
+    ]
+  },
+  "queryForms": [
+    {
+      "run": "keyword retriever alone, AND of the words",
+      "search-box queries recall@5": 1,
+      "search-box MRR": 1,
+      "questions recall@5": 0,
+      "questions MRR": 0
+    },
+    {
+      "run": "keyword retriever alone, OR of the words",
+      "search-box queries recall@5": 1,
+      "search-box MRR": 0.958,
+      "questions recall@5": 1,
+      "questions MRR": 1
+    },
+    {
+      "run": "keyword retriever alone, AND, falling back to OR",
+      "search-box queries recall@5": 1,
+      "search-box MRR": 1,
+      "questions recall@5": 1,
+      "questions MRR": 1
+    },
+    {
+      "run": "hybrid, AND keyword side (as shipped in 0.3.0)",
+      "search-box queries recall@5": 1,
+      "search-box MRR": 1,
+      "questions recall@5": 0.5,
+      "questions MRR": 0.24
+    },
+    {
+      "run": "hybrid, OR keyword side",
+      "search-box queries recall@5": 1,
+      "search-box MRR": 0.743,
+      "questions recall@5": 1,
+      "questions MRR": 0.633
+    },
+    {
+      "run": "hybrid, AND falling back to OR",
+      "search-box queries recall@5": 1,
+      "search-box MRR": 1,
+      "questions recall@5": 1,
+      "questions MRR": 0.633
+    },
+    {
+      "run": "hybridSearch() as it ships now",
+      "search-box queries recall@5": 1,
+      "search-box MRR": 1,
+      "questions recall@5": 1,
+      "questions MRR": 0.633
+    }
+  ]
+}

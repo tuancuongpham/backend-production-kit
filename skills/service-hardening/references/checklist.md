@@ -8,6 +8,9 @@ Tick each item, or write down why it doesn't apply. Items marked 🧪 should hav
 - [ ] 🧪 Load shedding: 503 + `Retry-After` beyond max in-flight
 - [ ] 🧪 Client disconnect cancels downstream work (DB, HTTP, LLM)
 - [ ] Every outbound call has a deadline; retries are bounded with jittered backoff and only for idempotent operations
+- [ ] 🧪 Postgres pool: `connectionTimeoutMillis` (without it, a connect to a black-holed database waits forever) and a
+  client-side `query_timeout`. A server-side `statement_timeout` limits server work, not a slow network
+  ([`resilience-testing.test.ts`](../../../verify/tests/resilience-testing.test.ts))
 - [ ] Per-tenant / per-user rate limits (see `rate-limiting`)
 
 ## Lifecycle
@@ -33,5 +36,7 @@ Tick each item, or write down why it doesn't apply. Items marked 🧪 should hav
 ## Resilience
 - [ ] Load test at 2× peak: numbers recorded in a benchmark doc
 - [ ] Rolling deploy under load: zero deploy-caused 5xx
-- [ ] Dependency failure drill: kill or slow the DB/Redis/LLM provider (Toxiproxy) and observe graceful degradation
+- [ ] 🧪 Dependency failure drill: slow, black-hole, reset and stop the DB/Redis/LLM provider through Toxiproxy and
+  assert the degradation each design promises (see `resilience-testing`)
+- [ ] Redis clients with `enableOfflineQueue: false` connect before readiness turns green
 - [ ] Runbook: how to roll back, how to replay dead letters, who is on call

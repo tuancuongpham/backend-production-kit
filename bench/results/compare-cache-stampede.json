@@ -1,0 +1,38 @@
+{
+  "name": "cache-stampede",
+  "date": "2026-10-22T07:49:25.494Z",
+  "node": "v24.22.1",
+  "instances": 4,
+  "requestsPerInstance": 50,
+  "originMs": 100,
+  "rows": [
+    {
+      "variant": "A. cache-aside",
+      "origin calls": 200,
+      "p50 ms": 141.045,
+      "p95 ms": 141.193,
+      "max ms": 141
+    },
+    {
+      "variant": "B. cache-aside + single-flight per process",
+      "origin calls": 4,
+      "p50 ms": 101.346,
+      "p95 ms": 101.701,
+      "max ms": 102
+    },
+    {
+      "variant": "C. shipped: single-flight + Redis lock",
+      "origin calls": 1,
+      "p50 ms": 104.566,
+      "p95 ms": 104.704,
+      "max ms": 105
+    },
+    {
+      "variant": "C. shipped, entry stale (stale-while-revalidate)",
+      "origin calls": 1,
+      "p50 ms": 0.692,
+      "p95 ms": 0.74,
+      "max ms": 1
+    }
+  ]
+}

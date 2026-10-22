@@ -83,13 +83,30 @@ export async function hybridSearch(client: pg.PoolClient, p: HybridSearchParams)
              ORDER BY embedding <=> $1::vector
              LIMIT $3) s
      ),
+     terms AS (
+       SELECT websearch_to_tsquery('simple', kit_unaccent($2)) AS all_words,
+              to_tsquery('simple', array_to_string(ARRAY(
+                SELECT quote_literal(w) FROM unnest(tsvector_to_array(to_tsvector('simple', kit_unaccent($2)))) w), ' | ')) AS any_word
+     ),
+     full_match AS (
+       SELECT c.id, ts_rank_cd(c.tsv, t.all_words) AS score
+       FROM chunks c, terms t
+       WHERE c.tsv @@ t.all_words
+       ORDER BY score DESC
+       LIMIT $3
+     ),
+     -- A question ("làm sao để hủy đơn hàng?") rarely shares every word with a chunk, and the keyword side would
+     -- find nothing. Only then, take chunks matching any of its words, the most matched first.
+     partial_match AS (
+       SELECT c.id, ts_rank_cd(c.tsv, t.any_word) AS score
+       FROM chunks c, terms t
+       WHERE c.tsv @@ t.any_word AND NOT EXISTS (SELECT 1 FROM full_match)
+       ORDER BY score DESC
+       LIMIT $3
+     ),
      keyword AS (
        SELECT id, rank() OVER (ORDER BY score DESC) AS rank
-       FROM (SELECT c.id, ts_rank_cd(c.tsv, q) AS score
-             FROM chunks c, websearch_to_tsquery('simple', kit_unaccent($2)) q
-             WHERE c.tsv @@ q
-             ORDER BY score DESC
-             LIMIT $3) k
+       FROM (SELECT * FROM full_match UNION ALL SELECT * FROM partial_match) k
      )
      SELECT c.id, c.document_id, c.content,
             (COALESCE(1.0 / ($4 + s.rank), 0) + COALESCE(1.0 / ($4 + k.rank), 0))::float8 AS rrf_score,

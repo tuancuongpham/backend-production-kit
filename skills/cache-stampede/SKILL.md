@@ -1,0 +1,87 @@
+---
+name: cache-stampede
+description: Add a read-through cache (Redis) that holds when a hot key expires under load — single-flight per process plus a Redis lock across instances so one request recomputes while the rest wait or get the stale value (stale-while-revalidate), jittered TTLs, cached misses, tenant-scoped keys, invalidation after commit, and failing open when Redis is down. Use whenever the user caches database queries, API responses, dashboards, LLM results or computed aggregates, sees load spikes or database CPU jumps when a cache entry expires, or mentions cache-aside, Redis cache, thundering herd, dogpile, cache stampede, "cache hết hạn là DB quá tải", "cache theo tenant".
+---
+
+# Cache that survives a stampede
+
+The usual cache-aside code (`get`, and on a miss `load` then `set`) is right with one user and wrong with many.
+When a popular entry expires, every request that arrives before the first `set` misses too. All of them run the
+same expensive query at once. The database falls over at exactly the moment the cache was supposed to protect it,
+and the cache can't refill because the query never finishes.
+
+The fix is to make sure that only one caller recomputes a key at a time, and that nobody else has to wait for it
+when a slightly old value is acceptable.
+
+```
+get(key, load)
+  in-process single-flight  → callers in this instance share one promise
+  fresh in Redis            → return it
+  stale (within staleSec)   → return it now; one instance refreshes in the background (Redis lock)
+  missing                   → the lock holder loads and writes; other instances poll for its value
+                              (and load themselves after waitMs if the holder died)
+  Redis slow or down        → load directly: the cache fails open
+```
+
+## Decision points: ask before coding
+
+| Decision | Default | Notes |
+|---|---|---|
+| What may be stale, and for how long | Fresh `ttlSec`, then served stale for another `staleSec` while refreshing | Prices, balances and permissions often may not be stale. Dashboards and catalogs usually may. Decide per key family. |
+| Invalidation | TTL, plus `invalidate(key)` after the commit (an outbox consumer for cross-service) | Never invalidate before the commit: a concurrent read refills the cache with the old row. |
+| Keys | `tenantKey(tenantId, …)` from authentication, with a version in the prefix | A key without the tenant serves one customer's data to another. Bump the prefix version to drop all entries after a format change. |
+| Redis down | Fail open: go to the origin, still single-flight per process | Fail closed only when the origin can't take the full load; then shed load (`service-hardening`). |
+| Misses | Cache `null` like any value | Otherwise lookups of ids that don't exist all reach the database. |
+| Where | Redis for shared state; an in-process LRU in front only for tiny, hot, rarely changing data | Two layers means two invalidation problems. |
+
+## Implementation steps
+
+1. **Client.** Create the ioredis client with `enableOfflineQueue: false` and a short `commandTimeout`, and add
+   `redis.on('error', log)`. Each cache call also races `timeoutMs` (50 ms), and a slow Redis counts as down.
+   Without the offline queue, commands fail until the connection is up, so connect before the instance reports
+   ready (`lazyConnect: true`, then `await redis.connect()`).
+2. **Cache.** `createCache({ redis, prefix: 'cache:v1', ttlSec, staleSec })` from
+   [references/cache.ts](references/cache.ts), then `cache.get(tenantKey(tenant, 'dashboard', id), () => query())`.
+   - The lock (`SET NX PX`, released by a compare-and-delete script) must outlive the slowest load (`lockMs`).
+   - A stale value is served while one instance refreshes it. If the refresh fails, the stale value keeps being
+     served until `staleSec` runs out; then the error surfaces.
+   - TTLs get up to 10% jitter, so keys written together don't expire together.
+3. **Writes.** Run `invalidate(key)` after the transaction commits. For data changed by other services, publish
+   the change through the outbox (`outbox-pattern`) and invalidate in its consumer.
+4. **Metrics.** Track hits (fresh and stale), misses, origin loads per key family, lock waits that fell back to
+   loading, and `onError` (Redis trouble). A falling hit rate after a deploy usually means a key format changed.
+
+## Verification (required)
+
+Against real Redis. [verify/tests/cache-stampede.test.ts](../../verify/tests/cache-stampede.test.ts) covers:
+- 100 concurrent misses in one process → **one origin call**.
+- **Three instances × 30 concurrent misses → one origin call** across all of them.
+- Once stale, 20 callers get the old value in under 100 ms while a single 200 ms refresh runs; afterwards they get
+  the new value. The origin was called twice in total, not 21 times.
+- Origin down: the stale value is served until it expires for good, the failed refresh is reported, then the error
+  surfaces.
+- An instance that died holding the lock blocks the others for `waitMs` only.
+- Redis down → requests reach the origin, still one call per key per process, and the outage is reported.
+- Jittered TTLs are spread over more than a second; `null` results are cached; keys carry the tenant.
+
+How to write these tests so they prove something:
+- Fire the requests concurrently against an origin that takes long enough to overlap them, and count origin calls.
+  Sequential gets never stampede.
+- Use several cache instances with separate Redis connections. That is what several app servers look like.
+
+## Record the decision
+ADR: staleness allowed per key family, invalidation path, key format and versioning, behaviour when Redis is down.
+
+## Common mistakes
+- **Plain cache-aside on a hot key.** With 4 instances × 50 requests arriving as the key expired, the origin ran 200
+  times. Single-flight per process brought that to 4, and the Redis lock to 1. When the entry was only stale,
+  requests were answered in 0.7 ms from the old value while one refresh ran ([performance](../../docs/performance.md)).
+  The origin here was a 100 ms sleep. A real database running the same heavy query 200 times at once also slows
+  everything else down.
+- Every key expiring at the same time (a cache warmed in one batch with one TTL): a scheduled stampede. Add jitter.
+- A lock without an expiry, or released without checking the token: a crashed holder blocks the key forever, or one
+  instance deletes another's lock.
+- Waiting on a lock forever: when the holder dies, every request for that key hangs.
+- Invalidating before the commit, or only in the instance that made the change.
+- Cache keys without the tenant (or user) when the value depends on who asks.
+- Letting a Redis outage take the site down with it: no timeout, an offline queue, no fallback to the origin.

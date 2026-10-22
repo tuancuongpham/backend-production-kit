@@ -146,6 +146,12 @@ describe('multitenant-postgres', () => {
     assert.ok(hits.every((h) => h.document_id === docA), 'only tenant A documents');
   });
 
+  it('a question still gets keyword matches: when no chunk has every word, any-word matches take over', async () => {
+    const hits = await withTenant(pool, A, (c) => hybridSearch(c, { embedding: fakeEmbedding(42), query: 'làm sao để thanh toán qua vnpay?', limit: 5 }));
+    const payment = hits.find((h) => h.content.startsWith('Hướng dẫn thanh toán'))!;
+    assert.equal(payment.keyword_rank, 1, '"làm sao để" appears in no chunk, so an AND-only keyword search found nothing');
+  });
+
   it("hybrid search never returns another tenant's identical content", async () => {
     const hits = await withTenant(pool, B, (c) => hybridSearch(c, { embedding: fakeEmbedding(1), query: 'thanh toán' }));
     assert.ok(hits.length > 0);

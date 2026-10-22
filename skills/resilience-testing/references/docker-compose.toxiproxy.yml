@@ -1,0 +1,17 @@
+# Toxiproxy next to the real dependencies, for local runs and CI. Tests create one proxy per dependency through
+# the API (POST /proxies) and point the app's connection strings at the proxy ports.
+services:
+  postgres:
+    image: postgres:17
+    environment:
+      POSTGRES_PASSWORD: dev
+  redis:
+    image: redis:7-alpine
+  toxiproxy:
+    image: ghcr.io/shopify/toxiproxy:2.9.0
+    ports:
+      - "8474:8474"    # API
+      - "55440:55440"  # proxy → postgres:5432 (created by the tests)
+      - "63800:63800"  # proxy → redis:6379
+# GitHub Actions: add the same three as `services:` of the job, publish the proxy ports, and the proxies reach
+# the other services by their service names (postgres, redis).

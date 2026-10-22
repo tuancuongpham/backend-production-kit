@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 0.6.0 — 2026-10-23
 
 ### Fixed — latent bugs, round 4: real input
 This round fed the skills what users, payment providers and models actually send: Vietnamese text in every form,

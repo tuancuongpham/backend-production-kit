@@ -326,7 +326,7 @@ A and C produced identical output on all 66 inputs.
 **Shipped:** unchanged, measured. The cheap hints skip most detectors on most lines, which a single combined
 pattern can't do.
 
-The release after 0.5.0 made the redactor catch more:
+0.6.0 made the redactor catch more:
 - credentials in URLs;
 - secret-named values in query strings, env dumps and JSON;
 - more key formats;

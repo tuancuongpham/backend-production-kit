@@ -151,7 +151,11 @@ export interface AgentDbOptions {
   /** Connection string for the agent_app role (read replica if you have one). */
   connectionString: string;
   tools: Record<string, ToolDef>;
-  audit: (entry: AuditEntry) => void;
+  /**
+   * Records every call, sync or async (an insert into an audit table). It is awaited: a call it can't record fails,
+   * so nothing reaches the model unaudited, and a rejected promise never goes unhandled.
+   */
+  audit: (entry: AuditEntry) => unknown;
   statementTimeoutMs?: number; // default 2000
   maxRows?: number; // default 200
   poolSize?: number; // default 5 — stay under the role's CONNECTION LIMIT
@@ -170,23 +174,30 @@ export interface ToolRunResult {
 }
 
 /** Runs the developer-written tools as the agent role: read-only, tenant-scoped, time-boxed, row-capped, audited. */
+/** A count or a duration from the options: a positive integer. From an unset environment variable it would be NaN. */
+function positiveInt(name: string, v: number): number {
+  if (!Number.isInteger(v) || v < 1) throw new RangeError(`agent db: ${name} must be a positive integer, got ${v}`);
+  return v;
+}
+
 export class AgentDb {
   readonly #pool: pg.Pool;
   readonly #tools: Record<string, ToolDef>;
-  readonly #audit: (entry: AuditEntry) => void;
+  readonly #audit: (entry: AuditEntry) => unknown;
   readonly #timeoutMs: number;
   readonly #maxRows: number;
 
   constructor(o: AgentDbOptions) {
     this.#tools = o.tools;
     this.#audit = o.audit;
-    this.#timeoutMs = o.statementTimeoutMs ?? 2000;
-    this.#maxRows = o.maxRows ?? 200;
-    if (!Number.isInteger(this.#timeoutMs) || this.#timeoutMs < 1) throw new RangeError('agent db: statementTimeoutMs must be a positive integer');
+    this.#timeoutMs = positiveInt('statementTimeoutMs', o.statementTimeoutMs ?? 2000);
+    // NaN here made every call a syntax error (LIMIT NaN); a pool of NaN or a connect timeout of 0 never times out.
+    this.#maxRows = positiveInt('maxRows', o.maxRows ?? 200);
+    for (const [name, tool] of Object.entries(o.tools)) if (tool.maxRows !== undefined) positiveInt(`${name}.maxRows`, tool.maxRows);
     this.#pool = new pg.Pool({
       connectionString: o.connectionString,
-      max: o.poolSize ?? 5,
-      connectionTimeoutMillis: o.connectTimeoutMs ?? 3000,
+      max: positiveInt('poolSize', o.poolSize ?? 5),
+      connectionTimeoutMillis: positiveInt('connectTimeoutMs', o.connectTimeoutMs ?? 3000),
       // The server-side statement_timeout limits the query; this limits the wait for its answer over a slow network.
       query_timeout: this.#timeoutMs + 1000,
       application_name: 'agent-db', // find the agent's sessions in pg_stat_activity
@@ -204,8 +215,10 @@ export class AgentDb {
       traceId: ctx.traceId,
       params: (rawParams ?? {}) as Record<string, unknown>,
     };
-    const fail = (error: unknown): never => {
-      this.#audit({
+    // Awaited, sync or async: if the entry can't be recorded, that failure is the call's answer (fail closed).
+    const audit = (entry: AuditEntry) => Promise.resolve().then(() => this.#audit(entry));
+    const fail = async (error: unknown): Promise<never> => {
+      await audit({
         ...base,
         ok: false,
         rowCount: 0,
@@ -228,23 +241,25 @@ export class AgentDb {
     }
 
     const maxRows = Math.min(tool.maxRows ?? this.#maxRows, this.#maxRows);
+    let res: pg.QueryResult;
     try {
-      const res = await withTransaction(
+      res = await withTransaction(
         this.#pool,
-        async (tx) => {
-          await tx.query(`SELECT set_config('app.tenant_id', $1, true), set_config('statement_timeout', $2, true)`, [ctx.tenantId, String(this.#timeoutMs)]);
-          // Fetch one extra row to know whether we truncated.
-          return tx.query(`SELECT * FROM (${tool.sql}) AS q LIMIT ${maxRows + 1}`, values);
-        },
-        { begin: 'BEGIN READ ONLY' },
+        // Fetch one extra row to know whether we truncated.
+        (tx) => tx.query(`SELECT * FROM (${tool.sql}) AS q LIMIT ${maxRows + 1}`, values),
+        // BEGIN and both settings in one round trip instead of two (a parameterized query can't share a call with
+        // BEGIN). Inlining is safe only because the tenant id passed UUID_RE above and the timeout is an integer
+        // checked at startup: nothing else can be in this string. Never inline a value that hasn't passed a check
+        // this strict.
+        { begin: `BEGIN READ ONLY; SELECT set_config('app.tenant_id', '${ctx.tenantId}', true), set_config('statement_timeout', '${this.#timeoutMs}', true)` },
       );
-      const truncated = res.rows.length > maxRows;
-      const rows = truncated ? res.rows.slice(0, maxRows) : res.rows;
-      this.#audit({ ...base, ok: true, rowCount: rows.length, truncated, durationMs: performance.now() - started });
-      return { rows, truncated };
     } catch (e) {
       return fail(e);
     }
+    const truncated = res.rows.length > maxRows;
+    const rows = truncated ? res.rows.slice(0, maxRows) : res.rows;
+    await audit({ ...base, ok: true, rowCount: rows.length, truncated, durationMs: performance.now() - started });
+    return { rows, truncated };
   }
 
   close(): Promise<void> {

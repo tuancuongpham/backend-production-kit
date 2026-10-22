@@ -1,0 +1,78 @@
+{
+  "name": "agent-db",
+  "date": "2026-10-22T19:45:40.444Z",
+  "node": "v24.22.1",
+  "rows": [
+    {
+      "variant": "A. set_config as its own query (0.5.0)",
+      "p50 ms": 0.597,
+      "p95 ms": 0.826,
+      "mean ms": 0.629
+    },
+    {
+      "variant": "B. BEGIN and set_config in one call",
+      "p50 ms": 0.466,
+      "p95 ms": 0.658,
+      "mean ms": 0.494
+    },
+    {
+      "variant": "C. shipped createAgentDb().run()",
+      "p50 ms": 0.508,
+      "p95 ms": 0.697,
+      "mean ms": 0.531
+    }
+  ],
+  "rounds": {
+    "A. set_config as its own query (0.5.0)": [
+      {
+        "p50": 0.673,
+        "p95": 0.928,
+        "mean": 0.701
+      },
+      {
+        "p50": 0.597,
+        "p95": 0.822,
+        "mean": 0.617
+      },
+      {
+        "p50": 0.591,
+        "p95": 0.826,
+        "mean": 0.629
+      }
+    ],
+    "B. BEGIN and set_config in one call": [
+      {
+        "p50": 0.531,
+        "p95": 0.747,
+        "mean": 0.551
+      },
+      {
+        "p50": 0.454,
+        "p95": 0.642,
+        "mean": 0.471
+      },
+      {
+        "p50": 0.466,
+        "p95": 0.658,
+        "mean": 0.494
+      }
+    ],
+    "C. shipped createAgentDb().run()": [
+      {
+        "p50": 0.519,
+        "p95": 0.724,
+        "mean": 0.535
+      },
+      {
+        "p50": 0.482,
+        "p95": 0.676,
+        "mean": 0.493
+      },
+      {
+        "p50": 0.508,
+        "p95": 0.697,
+        "mean": 0.531
+      }
+    ]
+  }
+}

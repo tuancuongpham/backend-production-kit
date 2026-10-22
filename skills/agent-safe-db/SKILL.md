@@ -38,8 +38,8 @@ Ask these together, in one message. If they don't know, propose the default and 
      rejects what Postgres would refuse, so the model gets a `ToolInputError` it can correct rather than a database
      error: a string holding a NUL, and a date that doesn't exist. `Date.parse` turns `2026-02-31` into March 3 and
      accepts year 0, while Postgres refuses both;
-   - runs `BEGIN READ ONLY` → `set_config('app.tenant_id', $tenant, true)` → `set_config('statement_timeout', …, true)` → the query wrapped in `LIMIT maxRows+1` → `COMMIT`;
-   - returns `{ rows, truncated }` and audits success *and* failure;
+   - runs `BEGIN READ ONLY` with both `set_config` calls (`app.tenant_id`, `statement_timeout`) in one round trip, then the query wrapped in `LIMIT maxRows+1`, then `COMMIT`. Three round trips instead of four made a tool call 15% faster (p50 0.597 → 0.508 ms, [performance](../../docs/performance.md)). The tenant id is inlined into that call, which is safe only because it passed a strict UUID check first, and the timeout is an integer checked at startup;
+   - returns `{ rows, truncated }` and audits success *and* failure. The audit may be async (an insert into an audit table): it is awaited, and an entry it can't record fails the call, so nothing reaches the model unaudited. A bare call left a rejected audit promise unhandled, which ends the process;
    - exports `toToolSchemas()` so the same definitions feed the LLM's tool list. No drift between what is allowed and what is advertised.
    Tenant and user come from the authenticated request context, **never from model output**. Enforce that scope *in the database*: the views filter on the GUC the executor sets, or use RLS. A `WHERE customer_id = $1` in each tool's SQL is one forgotten clause away from a leak. Likewise, mask PII *in the view*, not in app code after the query; the role should never be able to read raw values at all.
 3. **Wire the tool** into the agent framework (AI SDK, Anthropic tool use, MCP server…). Tool results go back to the model as data. Keep them small, since each extra row costs tokens and widens what can leak.
@@ -50,6 +50,8 @@ Ask these together, in one message. If they don't know, propose the default and 
    sessions are easy to find in `pg_stat_activity`. The listener calls `onError` through `callHook`: a hook that
    throws there would be an uncaught exception, the crash the listener exists to prevent. Copy `pg-transaction.ts`
    and `hooks.ts` along with `agent-db-tool.ts`.
+   `maxRows`, `poolSize`, `connectTimeoutMs` and `statementTimeoutMs` must be positive integers, checked at startup:
+   from an unset environment variable each is NaN, and `maxRows: NaN` made every call a syntax error (`LIMIT NaN`).
 
 ### If the user insists on raw SQL (text-to-SQL)
 Raise the bar further and say plainly that this is weaker:
@@ -93,3 +95,5 @@ Write an ADR (see the `adr-writer` skill) covering: the query surface (tools vs 
 - Letting the model choose `tenant_id`.
 - Logging full tool results with PII. Log row counts and ids, and run results through the `pii-redaction` skill if you must log them.
 - A dedicated pool with no `error` listener: the first idle connection the server ends (failover, `idle_session_timeout`) crashes the process. And no connect timeout: a black-holed database hangs every tool call forever.
+- Calling an async audit function without awaiting it. When the audit table is unreachable, the rejection is
+  unhandled and the process ends; and the model got data that was never audited.

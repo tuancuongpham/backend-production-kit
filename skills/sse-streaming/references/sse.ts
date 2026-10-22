@@ -42,7 +42,8 @@ export function formatEvent(e: SseEvent): string {
   let out = '';
   if (e.id !== undefined) out += `id: ${fieldValue(e.id, 'id')}\n`;
   if (e.event) out += `event: ${fieldValue(e.event, 'event')}\n`;
-  const data = typeof e.data === 'string' ? e.data : JSON.stringify(e.data);
+  // JSON.stringify(undefined) is undefined: an event without data gets an empty data field, which the browser delivers.
+  const data = typeof e.data === 'string' ? e.data : (JSON.stringify(e.data) ?? '');
   // One data field per line. A lone CR counts as a line break for the browser too: split on it as well, or text
   // after it is parsed as a field of its own ("hello\rid: 999" would set the last event id).
   for (const line of data.split(LINE_BREAK)) out += `data: ${line}\n`;
@@ -66,8 +67,16 @@ export class SseStream {
   #closed = false;
 
   constructor(req: http.IncomingMessage, res: http.ServerResponse, opts: SseOptions = {}) {
+    // Checked before anything is written. From an unset environment variable these are NaN: a heartbeat every
+    // millisecond, and a buffer limit that never refuses (`length > NaN` is never true).
+    const heartbeatMs = opts.heartbeatMs ?? 15_000;
+    const retryMs = opts.retryMs ?? 3000;
+    const maxBuffered = opts.maxBufferedBytes ?? 256 * 1024;
+    if (!Number.isInteger(heartbeatMs) || heartbeatMs < 1) throw new RangeError(`sse: heartbeatMs must be a positive integer, got ${heartbeatMs}`);
+    if (!Number.isInteger(retryMs) || retryMs < 0) throw new RangeError(`sse: retryMs must be an integer of 0 or more, got ${retryMs}`);
+    if (!(maxBuffered > 0) || !Number.isFinite(maxBuffered)) throw new RangeError(`sse: maxBufferedBytes must be a positive number, got ${maxBuffered}`);
     this.#res = res;
-    this.#maxBuffered = opts.maxBufferedBytes ?? 256 * 1024;
+    this.#maxBuffered = maxBuffered;
     this.#closeOn = opts.closeOn;
     this.signal = this.#ac.signal;
     this.lastEventId = typeof req.headers['last-event-id'] === 'string' ? req.headers['last-event-id'] : undefined;
@@ -77,10 +86,10 @@ export class SseStream {
       connection: 'keep-alive',
       'x-accel-buffering': 'no', // nginx: don't buffer
     });
-    res.write(`retry: ${opts.retryMs ?? 3000}\n\n`);
+    res.write(`retry: ${retryMs}\n\n`);
     this.#heartbeat = setInterval(() => {
       if (!this.#closed) res.write(': ping\n\n');
-    }, opts.heartbeatMs ?? 15_000);
+    }, heartbeatMs);
     this.#heartbeat.unref();
     const close = () => this.close();
     req.on('close', close);
@@ -251,6 +260,8 @@ export interface FeedOptions {
 /** Replay what the client missed, then follow live events until it disconnects. */
 export async function serveFeed<T>(sse: SseStream, feed: ReplayBuffer<T>, opts: FeedOptions = {}) {
   const maxQueue = opts.maxQueue ?? 1000;
+  // NaN (an unset environment variable) would never drop a stalled client: its queue would grow without bound.
+  if (!Number.isInteger(maxQueue) || maxQueue < 1) throw new RangeError(`serveFeed: maxQueue must be a positive integer, got ${maxQueue}`);
   // Subscribe first, replay second, dedup by id: nothing published during replay is lost.
   const queue: Array<ReplayItem<T>> = [];
   let wake: (() => void) | null = null;

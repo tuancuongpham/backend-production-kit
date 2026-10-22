@@ -51,7 +51,8 @@ cron:     tick() on every instance → each fire enqueued exactly once
    dedupKey })` from [references/jobs.ts](references/jobs.ts) with the transaction's client, never a separate
    pool query. Put ids in the payload, not whole objects that will be stale by the time the job runs.
    `enqueue` refuses an invalid `runAt` (a reminder time parsed from user input), a fractional `priority` and a
-   `maxAttempts` below 1 with a `RangeError`: answer it with 400.
+   `maxAttempts` below 1 with a `RangeError`: answer it with 400. So does a priority outside -32768 to 32767 (the
+   column is a smallint) and a `maxAttempts` beyond an int.
 3. **Handlers.** `createWorker({ pool, queue, handlers: { 'send-email': async (job, { signal }) => … } })`:
    - **safe to run twice**: key effects by `job.id`. A job runs again after a crash, a timeout or a lost lease;
    - pass `signal` to fetch, SDK and DB calls. It aborts at the job timeout, or when the lease was lost and another
@@ -67,6 +68,9 @@ cron:     tick() on every instance → each fire enqueued exactly once
      finish; jobs claimed but not started go back to the queue at once (`released`), their attempt not spent.
    - Leave `batchSize` at 1 unless jobs are tiny. With a batch, one heartbeat renews the lease of every job the
      batch holds, the waiting ones too, so a job queued behind a slow one can't expire and burn an attempt unrun.
+   - `createWorker` and `run()` refuse NaN settings with a `RangeError`. `loops: Number(process.env.LOOPS)` with the
+     variable unset is NaN, which used to start no loop at all; a NaN `idleMs` polled every millisecond, and a NaN
+     retry delay failed every retry and the rescue of expired leases with it.
    - Copy `hooks.ts`, `pg-transaction.ts`, `pg-values.ts` and `worker-loop.ts` along with `jobs.ts`: they are the kit's shared building blocks,
      identical in every skill that has them.
 5. **Recurring jobs.** Call `createScheduler({ pool, schedules: [{ name, kind, next: every(3_600_000) }] }).tick()`
@@ -74,6 +78,10 @@ cron:     tick() on every instance → each fire enqueued exactly once
    - Each due fire is enqueued exactly once: the schedule row is locked and moved forward in the transaction that
      enqueues the run.
    - For cron expressions, pass a parser's "next occurrence after" as `next`.
+   - A schedule whose `next()` throws, or gives no valid date after the one it was given (an impossible expression
+     such as February 31), doesn't fire, and the others still do. Pass `onError(err, scheduleName)` to log it; it is
+     reported on every tick until fixed. Without `onError`, `tick()` rejects with an `AggregateError` once the others
+     are enqueued.
    - Never `setInterval` a job in each app instance.
 6. **Operations.**
    - Wire `retryDead()` into an admin command for after a fix ships.
@@ -137,3 +145,6 @@ dead-letter alert owner.
   with a `RangeError` that says which.
 - **An async `onDead` alert.** If it rejects while the alert service is down, a bare call leaves an unhandled
   rejection, which ends the process. Hooks go through `callHook`.
+- **All schedules in one all-or-nothing step.** One `next()` returning an Invalid Date failed the transaction that
+  enqueues every due fire, and the registration of every schedule: one bad cron expression stopped all recurring
+  jobs. Each schedule's own code is checked on its own.

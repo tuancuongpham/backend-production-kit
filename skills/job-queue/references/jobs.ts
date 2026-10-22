@@ -31,8 +31,11 @@ export async function enqueue(db: pg.Pool | pg.PoolClient, job: NewJob): Promise
   if (job.runAt !== undefined && !(job.runAt instanceof Date && Number.isFinite(job.runAt.getTime()))) {
     throw new RangeError(`enqueue: runAt must be a valid Date, got ${String(job.runAt)}`);
   }
-  if (job.priority !== undefined && !Number.isInteger(job.priority)) throw new RangeError(`enqueue: priority must be an integer, got ${job.priority}`);
-  if (job.maxAttempts !== undefined && !(Number.isInteger(job.maxAttempts) && job.maxAttempts >= 1)) {
+  // The columns are smallint and int: a value past them would be a database error, not one naming the field.
+  if (job.priority !== undefined && !(Number.isInteger(job.priority) && job.priority >= -32_768 && job.priority <= 32_767)) {
+    throw new RangeError(`enqueue: priority must be an integer from -32768 to 32767, got ${job.priority}`);
+  }
+  if (job.maxAttempts !== undefined && !(Number.isInteger(job.maxAttempts) && job.maxAttempts >= 1 && job.maxAttempts <= 2 ** 31 - 1)) {
     throw new RangeError(`enqueue: maxAttempts must be a positive integer, got ${job.maxAttempts}`);
   }
   const { rows } = await db.query(
@@ -109,6 +112,11 @@ const positive = (v: number, name: string, integer = true) => {
   if (!(v > 0) || (integer && !Number.isInteger(v))) throw new RangeError(`job worker: ${name} must be a positive ${integer ? 'integer' : 'number'}, got ${v}`);
   return v;
 };
+/** A NaN delay (an unset environment variable) fails every retry, and with it the rescue of expired leases. */
+const delay = (v: number, name: string) => {
+  if (!Number.isFinite(v) || v < 0) throw new RangeError(`job worker: ${name} must be a number of ms, 0 or more, got ${v}`);
+  return v;
+};
 
 export class JobWorker {
   readonly #pool: pg.Pool;
@@ -129,8 +137,8 @@ export class JobWorker {
     this.#batchSize = positive(o.batchSize ?? 1, 'batchSize');
     this.#leaseSec = positive(o.leaseSec ?? 60, 'leaseSec', false);
     this.#timeoutMs = positive(o.timeoutMs ?? 15 * 60_000, 'timeoutMs', false);
-    this.#baseDelayMs = o.baseDelayMs ?? 1_000;
-    this.#maxDelayMs = o.maxDelayMs ?? 3_600_000;
+    this.#baseDelayMs = delay(o.baseDelayMs ?? 1_000, 'baseDelayMs');
+    this.#maxDelayMs = delay(o.maxDelayMs ?? 3_600_000, 'maxDelayMs');
     this.#random = o.random ?? Math.random;
     this.#onDead = o.onDead;
   }
@@ -326,6 +334,33 @@ export interface Schedule {
 
 export const every = (ms: number) => (after: Date) => new Date(after.getTime() + ms);
 
+/** The schedule's next fire strictly after `after`, checked: next() is the app's code (often a cron parser). */
+function nextFire(s: Schedule, after: Date): Date {
+  const next = s.next(after);
+  if (!(next instanceof Date) || !Number.isFinite(next.getTime()) || next <= after) {
+    throw new Error(`schedule "${s.name}": next(${after.toISOString()}) returned ${String(next)}, not a date after it`);
+  }
+  return next;
+}
+
+/** The first fire after `last` that is still ahead of `now`: the fires missed while nothing was ticking are skipped. */
+function followingFire(s: Schedule, last: Date, now: Date): Date {
+  let next = nextFire(s, last);
+  while (next <= now) next = nextFire(s, next);
+  return next;
+}
+
+export interface SchedulerOptions {
+  pool: pg.Pool;
+  schedules: Schedule[];
+  /**
+   * A schedule that can't be registered or moved forward: its next() threw, or gave no date after the one it was
+   * given (an impossible cron expression such as February 31). It doesn't fire, the others still do, and it is
+   * reported on every tick until it is fixed. Without onError, tick() rejects once the others are done.
+   */
+  onError?: (err: unknown, schedule: string) => unknown;
+}
+
 /**
  * Call tick() every few seconds from every instance. Each due fire is enqueued exactly once: the schedule
  * row is locked (SKIP LOCKED) and moved forward in the same transaction that enqueues the run. Fires missed
@@ -335,49 +370,73 @@ export const every = (ms: number) => (after: Date) => new Date(after.getTime() +
 export class Scheduler {
   readonly #pool: pg.Pool;
   readonly #schedules: Map<string, Schedule>;
-  #registered = false;
+  readonly #onError?: SchedulerOptions['onError'];
+  readonly #registered = new Set<string>();
 
-  constructor(o: { pool: pg.Pool; schedules: Schedule[] }) {
+  constructor(o: SchedulerOptions) {
     this.#pool = o.pool;
     this.#schedules = new Map(o.schedules.map((s) => [s.name, s]));
+    this.#onError = o.onError;
     if (this.#schedules.size !== o.schedules.length) throw new Error('scheduler: schedule names must be unique (each keys its own state row)');
   }
 
+  /** Enqueues the due fires; returns the names of the schedules that fired. */
   async tick(): Promise<string[]> {
-    if (!this.#registered) {
-      const now = new Date();
-      const schedules = [...this.#schedules.values()];
-      await this.#pool.query(
-        `INSERT INTO job_schedules (name, next_run_at) SELECT * FROM unnest($1::text[], $2::timestamptz[])
-         ON CONFLICT (name) DO NOTHING`,
-        [schedules.map((s) => s.name), schedules.map((s) => s.next(now))],
-      );
-      this.#registered = true;
-    }
-    return withTransaction(this.#pool, async (tx) => {
+    const failed: Array<{ name: string; err: unknown }> = [];
+    await this.#register(failed);
+    const fired = await withTransaction(this.#pool, async (tx) => {
       const { rows } = await tx.query(
         `SELECT name, next_run_at, now() AS db_now FROM job_schedules
           WHERE name = ANY($1) AND next_run_at <= now()
           FOR UPDATE SKIP LOCKED`,
-        [[...this.#schedules.keys()]],
+        [[...this.#registered]],
       );
+      const names: string[] = [];
       for (const r of rows) {
         const s = this.#schedules.get(r.name)!;
-        await enqueue(tx, { kind: s.kind, payload: s.payload, queue: s.queue, dedupKey: `schedule:${s.name}` });
-        let next = s.next(r.next_run_at);
-        while (next <= r.db_now) {
-          const after = s.next(next);
-          if (after <= next) throw new Error(`schedule "${s.name}": next() must move forward`);
-          next = after; // skip the fires missed while nothing was ticking
+        let next: Date;
+        try {
+          next = followingFire(s, r.next_run_at, r.db_now);
+        } catch (err) {
+          failed.push({ name: s.name, err }); // its own failure: it stays due, and the others go on
+          continue;
         }
+        await enqueue(tx, { kind: s.kind, payload: s.payload, queue: s.queue, dedupKey: `schedule:${s.name}` });
         await tx.query(`UPDATE job_schedules SET next_run_at = $2 WHERE name = $1`, [r.name, next]);
+        names.push(r.name);
       }
-      return rows.map((r) => r.name);
+      return names;
     });
+    if (failed.length) {
+      if (!this.#onError) throw new AggregateError(failed.map((f) => f.err), `scheduler: ${failed.map((f) => f.name).join(', ')} can't be scheduled`);
+      for (const { name, err } of failed) callHook(this.#onError, err, name);
+    }
+    return fired;
+  }
+
+  /** Creates the state row of every schedule not registered yet. One that can't say when it first fires waits. */
+  async #register(failed: Array<{ name: string; err: unknown }>) {
+    const now = new Date();
+    const rows: Array<[string, Date]> = [];
+    for (const s of this.#schedules.values()) {
+      if (this.#registered.has(s.name)) continue;
+      try {
+        rows.push([s.name, nextFire(s, now)]);
+      } catch (err) {
+        failed.push({ name: s.name, err });
+      }
+    }
+    if (rows.length === 0) return;
+    await this.#pool.query(
+      `INSERT INTO job_schedules (name, next_run_at) SELECT * FROM unnest($1::text[], $2::timestamptz[])
+       ON CONFLICT (name) DO NOTHING`,
+      [rows.map(([name]) => name), rows.map(([, next]) => next)],
+    );
+    for (const [name] of rows) this.#registered.add(name);
   }
 }
 
-export const createScheduler = (o: { pool: pg.Pool; schedules: Schedule[] }) => new Scheduler(o);
+export const createScheduler = (o: SchedulerOptions) => new Scheduler(o);
 
 // ---------- 4. Operations: dead letters and retention ----------
 

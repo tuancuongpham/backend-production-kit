@@ -9,6 +9,7 @@ import { randomUUID } from 'node:crypto';
 import { setTimeout as sleep } from 'node:timers/promises';
 import type { Redis } from 'ioredis';
 import { CircuitBreaker } from './circuit-breaker.ts';
+import { callHook } from './hooks.ts';
 import { withTimeout } from './with-timeout.ts';
 
 /**
@@ -42,7 +43,7 @@ export interface CacheOptions {
   breaker?: { threshold: number; cooldownMs: number };
   codec?: Codec;
   /** Redis failures and values the codec can't handle. The request is served either way. */
-  onError?: (err: unknown) => void;
+  onError?: (err: unknown) => unknown;
   random?: () => number;
 }
 
@@ -52,8 +53,15 @@ const UNAVAILABLE = Symbol('redis unavailable');
 const CIRCUIT_OPEN = new Error('cache: redis circuit open');
 const UNLOCK = `if redis.call('get', KEYS[1]) == ARGV[1] then return redis.call('del', KEYS[1]) end return 0`;
 
-/** Keys always carry the tenant: one tenant's cached answer must never reach another. */
-export const tenantKey = (tenantId: string, ...parts: Array<string | number>) => `t:${tenantId}:${parts.join(':')}`;
+/**
+ * Keys always carry the tenant: one tenant's cached answer must never reach another. Each part is percent-encoded,
+ * so a ':' inside an id can't shift the boundaries: tenant "org:1" with part "dashboard" and tenant "org" with part
+ * "1:dashboard" would otherwise share a key. Ids made of letters, digits and -_.!~*'() (UUIDs, numbers) are left as
+ * they are. A part from user text may hold half of an emoji (a query cut at a fixed length), on which
+ * encodeURIComponent throws: it becomes U+FFFD first, as it would on its way to Redis anyway.
+ */
+export const tenantKey = (tenantId: string, ...parts: Array<string | number>) =>
+  ['t', tenantId, ...parts].map((p) => encodeURIComponent(String(p).toWellFormed())).join(':');
 
 // An entry is "<freshUntil, epoch ms>:<codec output>": the codec's output stays opaque to the cache.
 type Entry = { value: unknown; freshUntil: number };
@@ -69,7 +77,7 @@ export class ReadThroughCache {
   readonly #timeoutMs: number;
   readonly #codec: Codec;
   readonly #breaker: CircuitBreaker;
-  readonly #onError?: (err: unknown) => void;
+  readonly #onError?: (err: unknown) => unknown;
   readonly #random: () => number;
   readonly #inflight = new Map<string, Promise<unknown>>();
   readonly #refreshing = new Set<string>();
@@ -148,7 +156,7 @@ export class ReadThroughCache {
       try {
         await this.#store(k, await load());
       } catch (err) {
-        this.#onError?.(err); // keep serving the stale value until it expires for good
+        this.#report(err); // keep serving the stale value until it expires for good
       } finally {
         await this.#unlock(k, token);
       }
@@ -225,7 +233,7 @@ export class ReadThroughCache {
   }
 
   #report(err: unknown) {
-    if (err !== CIRCUIT_OPEN) this.#onError?.(err);
+    if (err !== CIRCUIT_OPEN) callHook(this.#onError, err);
   }
 }
 

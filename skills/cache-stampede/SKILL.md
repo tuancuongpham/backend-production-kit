@@ -42,6 +42,10 @@ get(key, load)
    ready (`lazyConnect: true`, then `await redis.connect()`).
 2. **Cache.** `createCache({ redis, prefix: 'cache:v1', ttlSec, staleSec })` from
    [references/cache.ts](references/cache.ts), then `cache.get(tenantKey(tenant, 'dashboard', id), () => query())`.
+   - `tenantKey` percent-encodes each part, so a `:` inside an id can't shift the boundaries. `('org:1',
+     'dashboard')` and `('org', '1:dashboard')` would otherwise share a key: one tenant's answer served to
+     another. A part from user text (a search query cut at a fixed length) may hold half an emoji, which becomes
+     U+FFFD instead of throwing.
    - The lock (`SET NX PX`, released by a compare-and-delete script) must outlive the slowest load (`lockMs`).
    - A stale value is served while one instance refreshes it. If the refresh fails, the stale value keeps being
      served until `staleSec` runs out; then the error surfaces.
@@ -52,7 +56,7 @@ get(key, load)
      can't encode (a `BigInt` in JSON) is served uncached and reported, not failed.
    - Redis calls go through a circuit breaker: after 3 failures in a row the cache stops asking for a second, then
      one probe decides. A black-holed Redis then costs nothing per request instead of `timeoutMs` each.
-   - Copy `circuit-breaker.ts` and `with-timeout.ts` along with `cache.ts`: they are the kit's shared building blocks.
+   - Copy `circuit-breaker.ts`, `hooks.ts` and `with-timeout.ts` along with `cache.ts`: they are the kit's shared building blocks.
 3. **Writes.** Run `invalidate(key)` after the transaction commits. For data changed by other services, publish
    the change through the outbox (`outbox-pattern`) and invalidate in its consumer.
 4. **Metrics.** Track hits (fresh and stale), misses, origin loads per key family, lock waits that fell back to
@@ -97,3 +101,6 @@ ADR: staleness allowed per key family, invalidation path, key format and version
 - Letting a Redis outage take the site down with it: no timeout, an offline queue, no fallback to the origin.
 - Returning the loaded value on a miss and the decoded one on a hit. Dates, Maps and class instances change type
   between the first request and the second.
+- **A background refresh nobody awaits.** If anything in it can reject (an `onError` hook that throws, for one), the
+  rejection is unhandled and Node ends the process, from a request that had already been answered. The refresh
+  reports through `callHook` and can't reject.

@@ -127,4 +127,25 @@ describe('cache-stampede', () => {
     const b = await cache.get(tenantKey('tenant-b', 'dashboard'), async () => 'B data');
     assert.deepEqual([a, b], ['A data', 'B data']);
   });
+
+  it('invalidate() after the data changed: the next read loads the new value, and other keys stay cached', async () => {
+    const cache = createCache({ redis, prefix: prefix(), ttlSec: 60 });
+    const db = origin(0);
+    await cache.get('product:42', db.load);
+    await cache.get('product:43', db.load);
+    await cache.invalidate('product:42'); // the price changed, after the commit
+    assert.deepEqual(await cache.get('product:42', db.load), { version: 3 });
+    assert.deepEqual(await cache.get('product:43', db.load), { version: 2 });
+    assert.equal(db.calls, 3);
+  });
+
+  it('an entry this cache did not write (an old format, another app) is a miss that gets overwritten, and is reported', async () => {
+    const p = prefix();
+    const errors: unknown[] = [];
+    const cache = createCache({ redis, prefix: p, ttlSec: 60, onError: (e) => errors.push(e) });
+    await redis.set(`${p}:legacy`, '{"written":"by v1, without a timestamp"}');
+    assert.equal(await cache.get('legacy', async () => 'fresh'), 'fresh');
+    assert.equal(await cache.get('legacy', async () => 'not called'), 'fresh');
+    assert.match(String(errors[0]), /unreadable entry/);
+  });
 });

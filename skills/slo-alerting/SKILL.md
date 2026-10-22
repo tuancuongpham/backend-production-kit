@@ -38,6 +38,13 @@ SLO (objective, error ratio as PromQL)
 2. **Generate the rules.** `prometheusRules(slos)` returns recording rules for five windows plus the three burn-rate
    alerts. Write them with `JSON.stringify`: JSON is valid YAML. Commit the file. Never edit the generated rules by
    hand.
+   It refuses three definitions that would load fine and never alert:
+   - an error ratio without `{{window}}`, which gives five identical rules;
+   - an objective written as a percentage, `99.9` for `0.999`;
+   - an objective below 0.931, where the 14.4× page needs an error ratio above 1, more than every request failing.
+
+   For objectives that low (batch jobs, best-effort features), alert on the error ratio directly instead of on burn
+   rate.
 3. **Test the rules in CI with promtool** (`promtool check rules`, then `promtool test rules` with synthetic
    series). This is what proves the PromQL fires when you think it does.
    [The test](../../verify/tests/skills/slo-alerting.test.ts) runs promtool from the official image.

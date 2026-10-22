@@ -2,6 +2,7 @@
 // publish it later from a relay, dedup on the consumer side.
 import type pg from 'pg';
 import { withTransaction } from './pg-transaction.ts';
+import { pgJson, pgText } from './pg-values.ts';
 import { withTimeout } from './with-timeout.ts';
 import { runLoops } from './worker-loop.ts';
 
@@ -22,12 +23,15 @@ export interface OutboxMessage {
   headers: Record<string, string>;
 }
 
-/** Call with the client of the business transaction — never a separate pool query. */
+/**
+ * Call with the client of the business transaction — never a separate pool query. A NUL character in the event (a
+ * customer's note) is stored as U+FFFD: Postgres can't hold it, and it must not roll back the business change.
+ */
 export async function enqueue(tx: pg.PoolClient, e: OutboxEvent): Promise<string> {
   const { rows } = await tx.query(
     `INSERT INTO outbox (aggregate_type, aggregate_id, event_type, payload, headers)
      VALUES ($1, $2, $3, $4, $5) RETURNING id`,
-    [e.aggregateType, e.aggregateId, e.eventType, JSON.stringify(e.payload), JSON.stringify(e.headers ?? {})],
+    [pgText(e.aggregateType), pgText(e.aggregateId), pgText(e.eventType), pgJson(e.payload), pgJson(e.headers ?? {})],
   );
   return rows[0].id;
 }
@@ -57,7 +61,7 @@ export interface RelayRunOptions {
   signal: AbortSignal;
   /** Pause when the outbox is empty, another instance holds the relay lock, or a run failed (default 1000 ms). */
   idleMs?: number;
-  onError?: (err: unknown) => void;
+  onError?: (err: unknown) => unknown;
 }
 
 // Arbitrary constant; one relay holds it at a time.
@@ -107,7 +111,7 @@ export class OutboxRelay {
             () => new Error(`publish timeout after ${this.#publishTimeoutMs} ms`),
           );
         } catch (err) {
-          failure = { id: msg.id, error: String(err instanceof Error ? err.message : err).slice(0, 2000) };
+          failure = { id: msg.id, error: pgText(String(err instanceof Error ? err.message : err).slice(0, 2000)) };
           break; // keep order: retry this message first next time
         }
         published.push(msg.id);

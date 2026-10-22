@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import pg from 'pg';
 import { freshDatabase, runSqlFile } from '../support/infra.ts';
 import { waitFor } from '../support/wait.ts';
-import { consumeOnce, createRelay, enqueue, type OutboxMessage } from '../../../skills/outbox-pattern/references/outbox.ts';
+import { consumeOnce, createRelay, enqueue, pruneOutbox, type OutboxMessage } from '../../../skills/outbox-pattern/references/outbox.ts';
 
 let pool: pg.Pool;
 
@@ -129,5 +129,14 @@ describe('outbox-pattern', () => {
     assert.equal(sent.length, 26);
     assert.equal(new Set(sent).size, 26, 'each message once');
     assert.equal((await pool.query('SELECT count(*)::int n FROM outbox WHERE published_at IS NULL')).rows[0].n, 0);
+  });
+
+  it('pruneOutbox deletes published messages past the window, and never one still waiting to be published', async () => {
+    for (const id of ['old', 'recent', 'pending']) await placeOrder(id);
+    await pool.query(`UPDATE outbox SET published_at = now() - interval '8 days' WHERE aggregate_id = 'old'`);
+    await pool.query(`UPDATE outbox SET published_at = now() - interval '1 day' WHERE aggregate_id = 'recent'`);
+    assert.equal(await pruneOutbox(pool, 7), 1);
+    const left = (await pool.query(`SELECT aggregate_id FROM outbox ORDER BY aggregate_id`)).rows.map((r) => r.aggregate_id);
+    assert.deepEqual(left, ['pending', 'recent']);
   });
 });

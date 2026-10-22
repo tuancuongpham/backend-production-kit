@@ -59,6 +59,7 @@ for (const name of skills) {
 const markdown = [
   'README.md',
   'CHANGELOG.md',
+  'verify/README.md',
   ...walk('skills'),
   ...walk('docs'),
   ...walk('.github'),

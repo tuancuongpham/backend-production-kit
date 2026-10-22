@@ -2,7 +2,7 @@
 
 The reference code in `skills/*/references/` is what an agent copies into someone else's codebase. It has to be
 correct under failure, easy to adapt, and small enough to read in one sitting. These conventions keep the twenty
-skills consistent; the invariants at the end are the bug classes three review rounds found, each turned into a
+skills consistent; the invariants at the end are the bug classes five review rounds found, each turned into a
 rule with a test.
 
 ## Two kinds of code, and one exception
@@ -56,13 +56,15 @@ the core.
 
 ## The shared kernel
 
-Four building blocks recur across skills. Each skill ships as its own `.skill` file, so a skill can't import from
+Six building blocks recur across skills. Each skill ships as its own `.skill` file, so a skill can't import from
 another skill's folder. The canonical copies live in [`shared/`](../shared) and are vendored into each skill that
 imports them:
 
 | File | Gives you | Used by |
 |---|---|---|
 | [`pg-transaction.ts`](../shared/pg-transaction.ts) | `withClient`, `withTransaction`: a connection that dies mid-call fails that call, not the process | 9 skills |
+| [`pg-values.ts`](../shared/pg-values.ts) | `pgText`, `pgJson`: text from users, providers and models made storable (a NUL or half an emoji becomes U+FFFD, a BigInt a string) | 8 skills |
+| [`hooks.ts`](../shared/hooks.ts) | `callHook`: an app's hook (onError, onDead, onOverflow…) that throws or rejects changes nothing | 9 skills |
 | [`with-timeout.ts`](../shared/with-timeout.ts) | a deadline for any promise, whose late rejection can't crash Node | outbox, limiter, cache, server |
 | [`circuit-breaker.ts`](../shared/circuit-breaker.ts) | a breaker with a real half-open state: one probe, not the whole backlog | gateway, limiter, cache |
 | [`worker-loop.ts`](../shared/worker-loop.ts) | `runLoops`: independent poll loops, idle pause, graceful stop | webhooks, jobs, outbox |
@@ -98,6 +100,20 @@ Each of these was a bug in this kit, found by a failing test first. The fix is t
    (its next turn may hit another instance) and event ids that must survive a restart.
 9. **Untrusted text is inserted with a replacer function, never a replacement string.** In
    `String.prototype.replace`, `$&` and `$'` are patterns: an answer or a title containing them was mangled.
+10. **Text from outside is made storable where it is stored.** Postgres refuses a NUL in text and jsonb, and half
+    of a surrogate pair in jsonb: one `%00` in a webhook made the provider retry it forever, and a tool result cut
+    mid-emoji failed to store after the refund ran, so the retry refunded again. Every statement that stores
+    outside text goes through `pgText` or `pgJson`.
+11. **A value from outside is checked whole before the database sees it.** A pattern matches the whole value, a
+    date must exist, an id must parse. Otherwise the database is the validator: the caller gets a 500 or a
+    `22P02` instead of an error it can act on, and a pattern without anchors let `o-1'; DROP TABLE …` through as
+    an order id. Where the caller can't fix it (a URL edited by hand, an id the model made up), the value is
+    simply unknown.
+12. **A hook the app passes in can't change the outcome of the work it watches.** `onError`, `onDead`,
+    `onOverflow`, `onUsage`, `onBatch` go through `callHook`: whatever they throw, or the promise they return
+    rejects with, is dropped. Called bare, an alert that failed turned a recorded dead letter into an exception, an
+    async one rejecting while Slack was down ended the process, and a logger that threw stopped a worker loop.
+    To stop work, pass a signal, not a hook that throws.
 
 ## Testing seams
 
@@ -105,8 +121,21 @@ Each of these was a bug in this kit, found by a failing test first. The fix is t
 - No component keeps module-level mutable state.
 - Every worker has a single-step method for tests (`processOnce`, `relayOnce`, `tick`) and a loop for production
   (`run({ signal })`).
-- [`verify/tests/regressions/round-3.test.ts`](../verify/tests/regressions/round-3.test.ts) holds the 34 hypotheses
-  of the last review as tests, every one of which failed on the code before its fix.
+- The tests are organized by what they prove ([verify/README.md](../verify/README.md)), all against real Postgres,
+  Redis and Toxiproxy:
+  - `skills/<skill>.test.ts` prove what each skill's SKILL.md claims; `kernel/` the shared building blocks.
+  - `regressions/round-N.test.ts` hold each review round's hypotheses. Every one failed on the code before its fix:
+    34 in round 3, 25 in round 4, 21 in round 5.
+  - `journeys/` drive several skills end to end over real HTTP, wired as an application wires them, through what
+    users, providers and models do: retries, double taps, closed tabs, deploys, forged requests, edited URLs.
+  - `properties/` check rules over generated input (fast-check): personal data in any format never survives
+    redaction, and whatever a model sends is refused before the database would refuse it.
+  - `invariants/` check a rule across every skill that could break it.
+- Realistic input lives in [`fixtures/user-inputs.ts`](../verify/tests/fixtures/user-inputs.ts) and the generators
+  in [`support/arbitraries.ts`](../verify/tests/support/arbitraries.ts). A new test reuses them rather than
+  inventing "test" and "foo".
+- Coverage is measured on every CI run and fails below 98% of lines, 90% of branches, 95% of functions. ESLint runs
+  type-aware rules for bug classes: promises nobody awaits, returns that skip a `catch`, switches that miss a case.
 
 ## What it deliberately doesn't do
 

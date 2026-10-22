@@ -82,9 +82,35 @@ found in it (several are classic production incidents), now fixed and guarded by
 | Two schedulers process the same erasure request | the slower one reopened it after the subject id was erased: **retried forever with nobody to erase** | each request is leased to one run at a time |
 | The agent's read-only DB pool when Postgres drops an idle connection | **the process crashed** (no `error` listener); a black-holed database **hung every tool call** forever | the pool listens and times out: the call fails in about 3 s |
 | A dependency's circuit breaker ends its cooldown | every waiting request went to the dependency that was still down: **10 calls instead of 1 probe** | a real half-open state, shared by the gateway, limiter and cache |
+| A NUL (`%00`) in a webhook payload, an order note or a search query | Postgres refuses the whole statement: **the provider retries the webhook forever**, and the order **rolls back over its note** | stored as U+FFFD wherever outside text is stored, in eight skills |
+| An agent's write tool returns text cut mid-emoji (`text.slice(0, 200)`), or a BigInt id from its ORM | storing the result fails after the refund ran, so **the agent's retry refunds again** | stored, and the retry gets the first result; when storing fails anyway, the call stays claimed and never runs twice |
+| A phone number written in pairs (`09 01 23 45 67`) or as `(+84) 901 234 567` | **logged in clear**: the redactor's pre-check wanted three digits in a row | redacted in any grouping, checked against thousands of generated formats |
+| A tool-argument pattern written without `^…$` | `o-1'; DROP TABLE refunds; --` **accepted as an order id** | patterns match the whole value |
+| A chat message containing a bare CR | the browser reads it as a line break, so **the message sets the event id** the browser sends back on reconnect | split on CR, LF and CRLF; read back by a parser that reads streams as the browser does |
+| A deploy while browsers follow a live feed | every deploy **waited out the 20 s grace period**, then cut the streams | streams end once traffic has moved: 95 ms in the test, nothing forced |
+| An SLO with a 90% objective | a fast-burn page that **can never fire**: it needs 144% errors | refused, with the lowest objective that works (0.931) |
+| An async `onDead` alert while Slack is down | its rejection is unhandled: **the worker process exits** | a hook can't change the outcome: the dead letter stands, the worker runs on (in all nine skills that take hooks) |
+| A webhook signature with a character appended (`…0`) | **still verified**: `Buffer.from(sig, 'hex')` stops at the first character that isn't hex | only whole hex compares |
+| A long backfill run as a job that lost its lease | **keeps writing beside the run that replaced it** | stops after the current batch on the job's signal, resumable from `lastId` |
 
-The last review round listed 34 hypotheses about what could break and wrote each as a test. All 34 failed on the
-previous release, and all are fixed ([`regressions/round-3.test.ts`](verify/tests/regressions/round-3.test.ts)).
+Round 3 listed 34 hypotheses about what could break and wrote each as a test. All 34 failed on the release before
+it, and all are fixed ([`regressions/round-3.test.ts`](verify/tests/regressions/round-3.test.ts)).
+
+Round 4 fed the skills what users, payment providers and models actually send, and tested it three ways: driven end
+to end over real HTTP ([`journeys/`](verify/tests/journeys)), checked as properties over generated input
+([`properties/`](verify/tests/properties)), and written down as hypotheses
+([`regressions/round-4.test.ts`](verify/tests/regressions/round-4.test.ts)). On the previous release, these fail:
+- 25 of the 26 hypotheses;
+- 7 of the 37 journey steps;
+- 9 of the 23 properties.
+
+All of them pass now.
+
+Round 5 read round 4's code again as a reviewer, ran a type-aware linter over the whole repository, and measured
+which code no test reached. It found 21 more bugs; each hypothesis failed before its fix
+([`round-5.test.ts`](verify/tests/regressions/round-5.test.ts)). The suite now has 406 tests, organized by what they
+prove ([verify/README.md](verify/README.md)). They cover 99.5% of the reference code's lines and 92.1% of its
+branches, and CI fails below 98% and 90%.
 
 ## Incidents it is tested against
 
@@ -188,15 +214,17 @@ reference code, the properties that must be proven by tests, and the mistakes it
 - **Ports at the edges**: a broker, a model provider, a store or a codec is an adapter you plug in, with no change to
   the core.
 - **A small shared kernel** (transactions that survive a dead connection, a half-open circuit breaker, deadlines,
-  worker loops), vendored into each skill and kept identical by CI.
-- **Nine invariants** every skill keeps, each one a bug this kit once had: [docs/architecture.md](docs/architecture.md).
+  worker loops, text made storable, hooks that can't break the work), vendored into each skill and kept identical by CI.
+- **Twelve invariants** every skill keeps, each one a bug this kit once had: [docs/architecture.md](docs/architecture.md).
 
 ## Run the checks yourself
 
 ```bash
 npm install
+npm run check          # skill rules and links, types, lint: no Docker needed
 npm run verify:up      # Postgres 17 + pgvector, Redis 7 and Toxiproxy in Docker
 npm test               # reference code vs real infrastructure
+npm run coverage       # the same, with the coverage thresholds CI enforces
 npm run bench:docker -- bench/compare/webhook-claim.ts   # one approach comparison
 npm run verify:down
 ```

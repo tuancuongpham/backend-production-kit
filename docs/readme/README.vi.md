@@ -82,9 +82,36 @@ mẫu (nhiều cái là sự cố production kinh điển), nay đã sửa và c
 | Hai scheduler cùng xử lý một yêu cầu xóa dữ liệu | scheduler chậm hơn mở lại yêu cầu sau khi id người dùng đã bị xóa: **thử lại mãi mà không còn biết xóa của ai** | mỗi yêu cầu chỉ được một lần chạy giữ lease tại một thời điểm |
 | Pool DB chỉ đọc của agent khi Postgres ngắt một kết nối đang rảnh | **process bị sập** (không có listener `error`); database rơi vào hố đen thì **mọi tool call treo** mãi mãi | pool có listener và timeout: lời gọi lỗi sau khoảng 3 giây |
 | Circuit breaker của một dependency hết thời gian chờ | mọi request đang đợi cùng gọi vào dependency vẫn còn chết: **10 lần gọi thay vì 1 lần thăm dò** | có trạng thái half-open thật, dùng chung cho gateway, rate limiter và cache |
+| Ký tự NUL (`%00`) trong payload webhook, ghi chú đơn hàng hay từ khóa tìm kiếm | Postgres từ chối cả câu lệnh: **nhà cung cấp gửi lại webhook mãi mãi**, còn đơn hàng **bị rollback chỉ vì ghi chú** | lưu thành U+FFFD ở mọi chỗ lưu văn bản từ bên ngoài, trong tám skill |
+| Write tool của agent trả về chuỗi bị cắt giữa emoji (`text.slice(0, 200)`), hoặc id kiểu BigInt từ ORM | lưu kết quả thất bại sau khi đã hoàn tiền, nên **lần retry của agent hoàn tiền thêm lần nữa** | lưu được, lần retry nhận lại kết quả đầu tiên; nếu vẫn không lưu được, lời gọi giữ nguyên claim và không bao giờ chạy lần hai |
+| Số điện thoại viết theo cặp (`09 01 23 45 67`) hoặc `(+84) 901 234 567` | **ghi nguyên văn vào log**: bước kiểm tra nhanh của redactor đòi ba chữ số liền nhau | được che với mọi cách nhóm số, kiểm chứng trên hàng nghìn định dạng sinh tự động |
+| Pattern tham số tool viết thiếu `^…$` | `o-1'; DROP TABLE refunds; --` **được chấp nhận như một mã đơn hàng** | pattern phải khớp toàn bộ giá trị |
+| Tin nhắn chat chứa một ký tự CR đơn lẻ | trình duyệt coi đó là xuống dòng, nên **nội dung tin nhắn đặt được event id** mà trình duyệt gửi lại khi kết nối lại | tách dòng theo CR, LF và CRLF; đọc lại bằng parser đọc stream y như trình duyệt |
+| Deploy trong lúc trình duyệt đang theo dõi feed trực tiếp | mỗi lần deploy **chờ hết 20 giây grace period** rồi mới cắt stream | stream kết thúc ngay khi traffic đã chuyển đi: 95 ms trong test, không phải cắt cưỡng bức |
+| SLO có objective 90% | alert page khi budget cháy nhanh **không bao giờ bắn được**: nó cần 144% lỗi | bị từ chối, kèm objective thấp nhất dùng được (0,931) |
+| Hook `onDead` bất đồng bộ báo Slack trong lúc Slack sập | rejection không ai bắt: **process worker thoát** | hook không thể đổi kết quả: dead letter vẫn được ghi, worker chạy tiếp (ở cả chín skill có hook) |
+| Chữ ký webhook bị nối thêm một ký tự (`…0`) | **vẫn được chấp nhận**: `Buffer.from(sig, 'hex')` dừng ở ký tự đầu tiên không phải hex | chỉ so sánh khi là hex trọn vẹn |
+| Backfill dài chạy trong một job đã mất lease | **tiếp tục ghi song song với lần chạy thay thế nó** | dừng sau batch hiện tại khi signal của job bị hủy, resume được từ `lastId` |
 
-Vòng rà soát gần nhất đặt ra 34 giả thuyết về chỗ có thể hỏng và viết mỗi giả thuyết thành một test. Cả 34 đều fail
-trên bản phát hành trước, và đều đã được sửa ([`regressions/round-3.test.ts`](../../verify/tests/regressions/round-3.test.ts)).
+Vòng 3 đặt ra 34 giả thuyết về chỗ có thể hỏng và viết mỗi giả thuyết thành một test. Cả 34 đều fail trên bản phát
+hành trước đó, và đều đã được sửa ([`regressions/round-3.test.ts`](../../verify/tests/regressions/round-3.test.ts)).
+
+Vòng 4 đưa vào các skill đúng những gì người dùng, cổng thanh toán và model thật sự gửi, rồi kiểm tra theo ba cách:
+chạy trọn hành trình qua HTTP thật ([`journeys/`](../../verify/tests/journeys)), kiểm tra các tính chất trên input
+sinh tự động ([`properties/`](../../verify/tests/properties)), và ghi thành giả thuyết
+([`regressions/round-4.test.ts`](../../verify/tests/regressions/round-4.test.ts)). Trên bản phát hành trước, các test
+sau fail:
+- 25/26 giả thuyết;
+- 7/37 bước hành trình;
+- 9/23 tính chất.
+
+Giờ tất cả đều pass.
+
+Vòng 5 đọc lại code của vòng 4 với con mắt người review, chạy linter có hiểu kiểu dữ liệu trên toàn repo, và đo
+xem đoạn code nào chưa test nào chạm tới. Vòng này tìm thêm 21 bug; mỗi giả thuyết đều fail trước khi được sửa
+([`round-5.test.ts`](../../verify/tests/regressions/round-5.test.ts)). Bộ test giờ có 406 test, xếp theo thứ chúng chứng
+minh ([verify/README.md](../../verify/README.md)). Chúng phủ 99,5% số dòng và 92,1% số nhánh của code mẫu, và CI
+fail nếu tụt dưới 98% và 90%.
 
 ## Đã được test với các sự cố thật
 
@@ -178,15 +205,18 @@ theo khách"); skill phù hợp sẽ tự được nạp.
   dependency qua tham số và kiểm tra cấu hình ngay khi khởi động. **Hàm cho logic thuần** (metric, linter, chữ ký).
 - **Port ở biên**: broker, model provider, store hay codec là adapter cắm vào, không phải sửa phần lõi.
 - **Một bộ khung dùng chung nhỏ** (transaction chịu được kết nối chết, circuit breaker half-open, deadline, vòng lặp
-  worker), được chép vào từng skill và CI giữ cho các bản chép giống hệt nhau.
-- **Chín bất biến** mọi skill đều giữ, mỗi cái là một bug bộ kit từng mắc: [docs/architecture.md](../architecture.md).
+  worker, văn bản lưu được vào Postgres, hook không thể làm hỏng công việc), được chép vào từng skill và CI giữ cho các
+  bản chép giống hệt nhau.
+- **Mười hai bất biến** mọi skill đều giữ, mỗi cái là một bug bộ kit từng mắc: [docs/architecture.md](../architecture.md).
 
 ## Tự kiểm chứng
 
 ```bash
 npm install
+npm run check          # quy tắc skill và link, kiểu dữ liệu, lint: không cần Docker
 npm run verify:up      # Postgres 17 + pgvector, Redis 7 và Toxiproxy trong Docker
 npm test               # code mẫu chạy trên hạ tầng thật
+npm run coverage       # như trên, kèm ngưỡng coverage mà CI áp dụng
 npm run bench:docker -- bench/compare/webhook-claim.ts   # một bài so sánh phương án
 npm run verify:down
 ```

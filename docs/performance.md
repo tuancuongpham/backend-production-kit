@@ -277,18 +277,41 @@ the limiter is not the bottleneck, and past one Redis primary the answer is shar
 
 ### PII redaction engine · `pii-redaction`
 
-Throughput in strings per second, on CPU only:
+Throughput in strings per second, on CPU only (median of three runs):
 
 | Workload | A. per-detector regexes + hints (shipped) | B. same without hints | C. one combined regex, single pass |
 |---|---|---|---|
-| typical log lines | **1,454,888** | 807,722 | 1,081,264 |
-| no PII, no digits | **5,731,081** | 1,222,583 | 3,456,237 |
-| PII-heavy (2 KB, 20 values) | **114,723** | 49,036 | 34,320 |
+| typical log lines | **1,632,054** | 636,778 | 753,175 |
+| no PII, no digits | **4,439,521** | 1,030,096 | 2,530,136 |
+| PII-heavy (2 KB, 20 values) | **112,721** | 71,095 | 51,961 |
 
 A and C produced identical output on all 66 inputs.
 
 **Shipped:** unchanged, measured. The cheap hints skip most detectors on most lines, which a single combined
 pattern can't do.
+
+The release after 0.5.0 made the redactor catch more:
+- credentials in URLs;
+- secret-named values in query strings, env dumps and JSON;
+- more key formats;
+- CMND after its label;
+- emails in any script;
+- numbers in any grouping (the pre-check no longer wants three digits in a row).
+
+Measured on the same machine against 0.5.0:
+
+| Workload | Change |
+|---|---|
+| typical lines | 11% slower |
+| lines without PII | 20% slower |
+| PII-heavy lines | 9% faster |
+| a 50 KB line, a structured record | the same |
+
+The first version of the new detectors cost 32% and 42% on the first two workloads. Two changes won most of that
+back:
+- the detectors of one kind (keys, secrets, citizen ids) were merged;
+- a pre-check shared by neighbouring detectors (cards, ids, phones) runs once per line, because it fails again
+  until a detector changes the text.
 
 ### Schema changes on a live table · `zero-downtime-migrations`
 

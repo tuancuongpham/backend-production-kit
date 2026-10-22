@@ -1,5 +1,234 @@
 # Changelog
 
+## Unreleased
+
+### Fixed — latent bugs, round 4: real input
+This round fed the skills what users, payment providers and models actually send: Vietnamese text in every form,
+a NUL from a `%00`, half an emoji left by `slice(0, n)`, links edited by hand, made-up ids, days that don't exist.
+It also drove the skills end to end over real HTTP (`verify/tests/journeys/`) and with generated input
+(`verify/tests/properties/`). On 0.5.0, 25 of the 26 tests in `regressions/round-4.test.ts` fail (the 26th guards
+against over-redaction), as do 7 of the 37 journey steps and 9 of the 23 properties that run on it. All pass now.
+- Storage, in `webhook-ingestion`, `outbox-pattern`, `job-queue`, `idempotency-keys`, `llm-tool-safety`,
+  `multitenant-postgres`, `llm-gateway` and `data-retention-and-erasure`:
+  - one NUL anywhere in a payload, a note, a search query or a model's arguments failed the whole statement
+    (22021, 22P05). The provider retried the webhook forever, and an order rolled back because of its note.
+  - Half of an emoji did the same to jsonb (22P02). In `llm-tool-safety` it was worse: a write tool's result cut
+    mid-emoji failed to store *after* the tool ran, so the agent's retry ran the refund a second time.
+  - The new kernel file `pg-values.ts` (`pgText`, `pgJson`) stores both as U+FFFD at every storage boundary.
+- `llm-tool-safety`:
+  - a pattern written without `^…$` accepted `o-1'; DROP TABLE refunds; --` as an order id. Patterns now match
+    the whole value, and `schemas()` states them anchored.
+  - An approval id the model made up, or one edited in a URL, was a database error (22P02) instead of an unknown
+    approval.
+  - `decide()` took any string as the decision: `approve` was a 500, and `used` marked an approval used without
+    spending it.
+  - A tool-call id holding a NUL threw out of `call()`.
+- `agent-safe-db`: a string parameter holding a NUL reached Postgres, and so did a date that doesn't exist. Those
+  are `2026-02-31`, which `Date.parse` turns into March 3, and `0000-01-01`. Both are `ToolInputError`s now, which
+  the model can correct.
+- `sse-streaming`:
+  - a bare CR is a line break to the browser, so `hello\rid: 999` in a message set the id the browser sends back
+    on reconnect. Data is split on CR, LF and CRLF, and an id or event name holding a line break is refused.
+  - Closing a tab mid-answer made `streamTokens` rethrow the SDK's `AbortError`, so every closed tab was logged as
+    a failed request.
+  - A model failing partway dropped the connection. The stream now ends with a `failed` event, and the error is
+    still rethrown for the app to log.
+- `service-hardening`:
+  - after a clean shutdown, a timer kept the process alive for the whole `shutdownGraceMs` (20 s).
+  - An open event stream made every deploy wait out the grace period and end forced. See `ctx.shuttingDown`
+    below: a deploy with a live feed now takes 95 ms in the journey test instead of 5 s.
+- `pii-redaction`. These were missed:
+  - phone numbers written `(+84) 901 234 567` or `84 901 234 567`;
+  - any number grouped in pairs, such as `09 01 23 45 67`: the pre-check wanted three digits in a row;
+  - CMND numbers, and CCCD numbers with spaces, after their label;
+  - emails with Vietnamese letters;
+  - credentials in connection strings;
+  - OAuth tokens and signatures in query strings;
+  - `DB_PASSWORD=…` in env dumps and `"password": "…"` in a raw JSON body;
+  - GitHub, AWS, Google and Slack tokens.
+
+  Logging also threw on an object with a throwing getter (an ORM entity's lazy relation), on a proxy, and on an
+  error with a non-string message. Errors now keep their `code`, `cause` and a redacted `detail` (where Postgres
+  puts the duplicated email).
+- `cache-stampede`:
+  - `tenantKey('org:1', 'dashboard')` and `tenantKey('org', '1:dashboard')` were the same key. Parts are now
+    percent-encoded.
+  - A part holding half an emoji threw `URIError`.
+- `slo-alerting`: three definitions loaded fine and could never alert. All three are now refused:
+  - an error ratio without `{{window}}` (five identical rules);
+  - `99.9` instead of `0.999`;
+  - an objective under 0.931, whose 14.4× page would need more than 100% errors.
+- `rag-evals`: a pull request that changed k compared recall@10 with the baseline's recall@5, and passed the
+  gate. Runs with different k now fail it, and `evaluateRetriever` refuses a k below 1.
+- `llm-gateway`: the cosine similarity of two small vectors underflowed to `Infinity`.
+
+### Fixed — latent bugs, round 5: a second look
+Round 5 had three parts:
+- round 4's code read again, as a reviewer would;
+- a type-aware linter over the whole repository, for the first time;
+- a measurement of which code no test reached.
+
+Its 21 hypotheses (`verify/tests/regressions/round-5.test.ts`) all failed before their fixes and pass now. The
+linter found one more bug, in the cache's background refresh, and the coverage report showed where tests were
+missing.
+- `llm-tool-safety`:
+  - once a write tool ran, a failure to record its result released the call, so the agent's retry ran the tool
+    again: a second refund. That happened when the result held a BigInt (what ORMs return for bigint columns), when
+    it pointed back at itself, or when the session couldn't be marked untrusted. Now the call stays claimed and
+    answers `error`. A tool that failed is still released, so its retry runs.
+  - A pattern written with the `m` flag matched line by line, so `o-1\nDROP TABLE refunds` passed on its first line.
+  - A tool-call id longer than an index entry holds (about 2.7 KB) was a database error. Long ids are stored as
+    their hash.
+  - `schemas()` showed the model `^a|b$` as it was, which anchors each side only.
+- Storage (`pg-values.ts`): a BigInt anywhere in a stored value threw, in an idempotency response, a job payload or
+  an outbox event. In `idempotency-keys` it rolled back the order and failed every retry the same way. BigInts are
+  now stored as decimal strings.
+- Hooks: in eight skills, a hook the app passes in changed the outcome of the work it watched, when it threw or
+  returned a promise that rejected:
+  - `cache-stampede`: an `onError` that threw during a background refresh became an unhandled rejection, which ends
+    the process;
+  - `agent-safe-db`: an `onError` that threw for an idle connection the server ended became an uncaught exception,
+    the very crash that listener exists to prevent;
+  - worker loops (`webhook-ingestion`, `job-queue`, `outbox-pattern`): an `onError` that threw stopped the loop;
+  - `webhook-ingestion` and `job-queue`: an `onDead` that threw made the batch reject, and an async one that rejected
+    (Slack down) ended the process;
+  - `sse-streaming`: a subscriber that threw kept the event from the others and failed the publisher, and an
+    `onOverflow` that threw kept the stalled client connected;
+  - `rate-limiting`: an `onRedisError` that threw failed the request, where the failure mode should have decided;
+  - `llm-gateway`: an `onUsageError` that threw failed a request whose answer was already paid for.
+
+  Every skill now calls its hooks through the new kernel file `hooks.ts` (`callHook`).
+- `webhook-ingestion`: a valid signature with anything appended (`…0`, `…z`) still verified, because
+  `Buffer.from(s, 'hex')` stops at the first character that isn't hex.
+- `zero-downtime-migrations`:
+  - a backfill could not be stopped. Run in a job that lost its lease, it kept writing beside the run that
+    replaced it. `backfill()` now takes a `signal`.
+  - The linter split a function body in `$fn1$` quotes, or an `E'it\'s; …'` string, at its semicolons, and flagged
+    statements that weren't there.
+- `job-queue`: an Invalid Date as `runAt` (a reminder time typed by a user), a fractional priority or
+  `maxAttempts: 0` reached Postgres as a cryptic error. `enqueue` now refuses them with a `RangeError` that names the
+  field.
+- `multitenant-postgres`: `hybridSearch` passed `limit` and `candidates` straight to Postgres. From a query string,
+  `-1` was a database error, and `candidates=1000000` a scan of the tenant's whole index. It now takes 1 to 100
+  results and 1 to 1,000 candidates.
+- `pii-redaction` and `llm-observability`: truncating a long log line or trace attribute could cut an emoji in two,
+  leaving invalid text for whatever reads it next.
+
+### Changed
+- `service-hardening`: `RequestContext.shuttingDown`, an `AbortSignal` that fires once a shutdown stops taking
+  requests, after the drain delay. Long-lived responses end on it, so their clients reconnect to an instance that
+  stays. Ending earlier would send the reconnect back to this instance, into a 503, which makes EventSource give
+  up.
+- `sse-streaming`:
+  - `openSse(req, res, { closeOn })` ends a stream cleanly when the signal fires; pass it `ctx.shuttingDown`.
+  - `formatEvent()` is exported for frameworks that write the response themselves.
+  - Clients close their EventSource on `failed` as they do on `done`.
+- New kernel files `shared/pg-values.ts` (vendored into eight skills) and `shared/hooks.ts` (into nine). Hooks are
+  typed to return `unknown`, so an async hook is fine: its rejection is dropped like a throw.
+- `zero-downtime-migrations`: `backfill({ signal })` stops after the current batch, and the error carries `lastId`.
+  A job passes its `ctx.signal`.
+- `llm-tool-safety`: a write whose result can't be recorded answers `error`, "the tool ran, but its result could not
+  be recorded". It stays claimed until `staleRunSec`, so the retry gets "still running", not a second run.
+- `tsconfig.json` type-checks the tests and benchmarks too. A test reading `ctx.shutdown`, which doesn't exist,
+  passed `undefined` along and still ran.
+- To upgrade from 0.5.0:
+  - no SQL changes. Copy `pg-values.ts` with the skills that import it.
+  - `tenantKey` output changed for ids with characters outside `A-Za-z0-9-_.!~*'()`: a one-time miss for those
+    keys.
+  - The redactor has new placeholders (`[URL_CREDENTIALS]`, `[SECRET]`). Update any alert or dashboard that
+    matches on them.
+  - `ToolGuard#decide` throws a `TypeError` for a decision other than `approved` or `denied`. Check the decision in
+    the route and answer 400.
+  - `prometheusRules` refuses objectives below 0.931, and `compareReports` fails two runs with a different `k`.
+    Both may stop a CI job that passed before; neither ever measured what it seemed to.
+  - A token stream that fails partway ends with `failed`. Close the EventSource on it, as on `done`.
+  - Throwing from `backfill`'s `onBatch` no longer stops it: pass `signal`. A hook throwing anywhere else no longer
+    stops anything either.
+  - `hybridSearch` throws a `RangeError` for a `limit` outside 1 to 100 or `candidates` outside 1 to 1,000, and
+    `enqueue` for an invalid `runAt`, `priority` or `maxAttempts`. Answer them with 400.
+  - BigInts in stored JSON (responses, payloads, tool results) come back as strings.
+
+### Performance
+- The redactor checks more formats, measured against 0.5.0 on the same machine
+  ([details](docs/performance.md#pii-redaction-engine--pii-redaction)):
+
+  | Workload | Change |
+  |---|---|
+  | typical log lines | 11% slower |
+  | lines without PII | 20% slower |
+  | PII-heavy lines | 9% faster |
+  | a 50 KB line (0.1 ms), a structured record (140,000/s) | the same |
+
+  Merging the detectors of one kind and running a shared pre-check once per line halved the first version's cost.
+
+### Tooling
+- Tests are organized by kind in `verify/tests/`; [verify/README.md](verify/README.md) says what each folder proves and
+  when to add a test there:
+
+  | Folder | Holds |
+  |---|---|
+  | `skills/` | one file per skill |
+  | `kernel/` | the shared building blocks |
+  | `journeys/` | end-to-end runs over HTTP |
+  | `properties/` | generated-input tests |
+  | `regressions/` | `round-N`, one file per review round |
+  | `invariants/` | rules that cross skills |
+  | `support/`, `fixtures/` | helpers and inputs |
+
+  The old `helpers.ts` is now `support/infra.ts`, `wait.ts` and `vectors.ts`.
+- ESLint with type-aware rules for bug classes, not style (`npm run lint`): a promise nobody awaits, a `return`
+  inside `try` that skips its `catch`, a switch that misses a case, a thrown non-error. It found the cache's
+  unhandled rejection.
+- `npm run coverage` runs every test with coverage of the reference code and the kernel, and fails below 98% of
+  lines, 90% of branches or 95% of functions. The kernel is measured once, in `shared/`, not again in every skill's
+  copy. Now: 99.5% of lines, 92.1% of branches, 96.8% of functions.
+- `npm run check` runs validate, typecheck and lint. `npm run test:<kind>` runs one folder of tests.
+- CI runs a fast `check` job without services before `verify`, and the release job runs the same checks. The Node
+  version comes from `.nvmrc`.
+- `.editorconfig`, and a `.gitattributes` that stores and checks out text with LF on every platform.
+- `sync:shared` and `validate` share one rule for which kernel files a skill needs (`scripts/lib/kernel.mjs`). That
+  includes the files a kernel file imports itself: `worker-loop.ts` imports `hooks.ts`.
+- `validate` also checks that each SKILL.md names every kernel file its skill needs, because an agent copies what
+  the guide tells it to. The check found one gap at once: `multitenant-postgres` never said to copy
+  `pg-transaction.ts`, which `tenant-db.ts` imports, so the code an agent produced from it didn't load.
+
+### Tests
+- Two more journeys:
+  - two shops sharing the platform: search, an edited id, no tenant at all, odd limits, and both shops at once over
+    a pool of two connections. They run as the app role; with a superuser pool, 4 of the 7 steps fail.
+  - A customer's data rights: an export, a deletion tapped twice, a cached profile, a search index that is down.
+- `verify/tests/kernel/` tests every shared building block.
+- Tests for code no test reached:
+  - `invalidate()`, and cache entries this cache didn't write;
+  - `pruneOutbox`;
+  - a client leaving mid-upload, `deadline()`, and the signal handlers;
+  - the retry of a failed write;
+  - an embedding provider that is down, and the ANN semantic cache;
+  - a job whose lease is lost while it runs;
+  - the linter's remaining rules, unsafe inventories, and a failed retrieval span.
+- 406 tests in all, up from 334.
+- `verify/tests/journeys/` drives the skills end to end over real HTTP, wired the way an application wires them,
+  with what people and systems do:
+  - checkout: a retry after a lost answer, a double tap, a tab closed mid-payment, a deploy mid-payment, a bot;
+  - payment webhooks: duplicates, ten parallel deliveries, forged and captured requests, out-of-order events, a
+    dead letter replayed after the fix, a delivery the provider never made;
+  - the assistant's stream: a closed tab, a failing model, a reconnect with `Last-Event-ID`, a deploy;
+  - agent approvals: an injected instruction, made-up ids, edited links, four eyes, another shop's supervisor.
+- `verify/tests/properties/` holds property tests with fast-check. Each property runs a few hundred generated
+  inputs; a deterministic seed keeps CI repeatable, and `KIT_FC_SEED=random` explores further. They show:
+  - personal data in any grouping never survives redaction;
+  - whatever a model sends is accepted only if the database accepts it too;
+  - event streams, signatures and stored values round-trip;
+  - cache keys never collide;
+  - metrics stay in range.
+- `verify/tests/fixtures/user-inputs.ts` collects the inputs. `verify/tests/support/` has:
+  - an HTTP client;
+  - a parser that reads an event stream exactly as the browser does;
+  - `EventStreamTab`, a browser tab with a stream open;
+  - `Gate`, which holds code at a point the test chooses;
+  - the generators.
+- `npm test` runs `verify/tests/**/*.test.ts`. The tests share one `waitFor` helper instead of three.
+
 ## 0.5.0 — 2026-10-22
 
 ### Fixed — latent bugs, round 3

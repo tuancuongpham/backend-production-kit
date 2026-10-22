@@ -52,6 +52,21 @@ const UNAVAILABLE = Symbol('redis unavailable');
 /** Thrown instead of calling Redis while the breaker is open. Expected, so not reported. */
 const CIRCUIT_OPEN = new Error('cache: redis circuit open');
 const UNLOCK = `if redis.call('get', KEYS[1]) == ARGV[1] then return redis.call('del', KEYS[1]) end return 0`;
+/** What invalidate() leaves in place of an entry: a miss, and a marker no older write matches. */
+const TOMBSTONE = '~';
+/**
+ * Writes only if the key still holds what the writer saw before it loaded: ARGV[1] is '' for nothing, else a prefix of
+ * the value it read. A fill or refresh that read the old row before a change then can't land after the change's
+ * invalidate(), which replaced the entry with a tombstone. One key, so it works on Redis Cluster too.
+ */
+const STORE_IF_UNCHANGED = `local cur = redis.call('get', KEYS[1])
+if ARGV[1] == '' then
+  if cur then return 0 end
+elseif not cur or string.sub(cur, 1, #ARGV[1]) ~= ARGV[1] then
+  return 0
+end
+redis.call('set', KEYS[1], ARGV[2], 'PX', ARGV[3])
+return 1`;
 
 /**
  * Keys always carry the tenant: one tenant's cached answer must never reach another. Each part is percent-encoded,
@@ -65,6 +80,8 @@ export const tenantKey = (tenantId: string, ...parts: Array<string | number>) =>
 
 // An entry is "<freshUntil, epoch ms>:<codec output>": the codec's output stays opaque to the cache.
 type Entry = { value: unknown; freshUntil: number };
+/** A read: the entry (null on a miss) and what a later write must still find there (see STORE_IF_UNCHANGED). */
+type Observed = { entry: Entry | null; seen: string };
 
 export class ReadThroughCache {
   readonly #redis: Redis;
@@ -83,15 +100,20 @@ export class ReadThroughCache {
   readonly #refreshing = new Set<string>();
 
   constructor(o: CacheOptions) {
-    if (!(o.ttlSec > 0)) throw new RangeError('cache: ttlSec must be positive');
+    // From an unset environment variable each of these is NaN, which switches the cache off one way or another: a
+    // write with PX NaN fails, a NaN lock is never taken, a NaN timeout fails every call. Refused at startup.
+    const setting = (name: string, v: number, min: number, above = false) => {
+      if (!Number.isFinite(v) || v < min || (above && v === min)) throw new RangeError(`cache: ${name} must be a number ${above ? 'above' : 'of at least'} ${min}, got ${v}`);
+      return v;
+    };
     this.#redis = o.redis;
     this.#prefix = o.prefix;
-    this.#ttlMs = o.ttlSec * 1000;
-    this.#staleMs = (o.staleSec ?? o.ttlSec) * 1000;
-    this.#jitter = o.jitter ?? 0.1;
-    this.#lockMs = o.lockMs ?? 10_000;
-    this.#waitMs = o.waitMs ?? 2_000;
-    this.#timeoutMs = o.timeoutMs ?? 50;
+    this.#ttlMs = setting('ttlSec', o.ttlSec, 0, true) * 1000;
+    this.#staleMs = setting('staleSec', o.staleSec ?? o.ttlSec, 0) * 1000;
+    this.#jitter = setting('jitter', o.jitter ?? 0.1, 0);
+    this.#lockMs = Math.ceil(setting('lockMs', o.lockMs ?? 10_000, 0, true));
+    this.#waitMs = setting('waitMs', o.waitMs ?? 2_000, 0);
+    this.#timeoutMs = setting('timeoutMs', o.timeoutMs ?? 50, 0, true);
     this.#codec = o.codec ?? jsonCodec;
     this.#breaker = new CircuitBreaker(o.breaker ?? { threshold: 3, cooldownMs: 1000 });
     this.#onError = o.onError;
@@ -111,28 +133,33 @@ export class ReadThroughCache {
     return p;
   }
 
-  /** Drop a key after the data behind it changed. Call it after the commit, e.g. from an outbox consumer. */
+  /**
+   * Drop a key after the data behind it changed. Call it after the commit, e.g. from an outbox consumer. The entry
+   * becomes a tombstone for lockMs: a fill or a refresh that read the old row before the change and finishes after
+   * this call finds it and doesn't write. (With a plain DEL it wrote the old row back, for a whole TTL.)
+   */
   async invalidate(key: string): Promise<void> {
-    await this.#call(() => this.#redis.del(`${this.#prefix}:${key}`));
+    await this.#call(() => this.#redis.set(`${this.#prefix}:${key}`, `${TOMBSTONE}${randomUUID()}`, 'PX', this.#lockMs));
   }
 
   async #resolve<T>(k: string, load: () => Promise<T>): Promise<T> {
-    const cached = await this.#read(k);
-    if (cached === UNAVAILABLE) return this.#roundTrip(await load()).value;
-    if (cached && Date.now() < cached.freshUntil) return cached.value as T;
-    if (cached) {
-      this.#refreshInBackground(k, load);
-      return cached.value as T; // stale but within staleSec: answer now
+    const read = await this.#read(k);
+    if (read === UNAVAILABLE) return this.#roundTrip(await load()).value;
+    const { entry, seen } = read;
+    if (entry && Date.now() < entry.freshUntil) return entry.value as T;
+    if (entry) {
+      this.#refreshInBackground(k, load, seen);
+      return entry.value as T; // stale but within staleSec: answer now
     }
-    return this.#fill(k, load);
+    return this.#fill(k, load, seen);
   }
 
-  async #fill<T>(k: string, load: () => Promise<T>): Promise<T> {
+  async #fill<T>(k: string, load: () => Promise<T>, seen: string): Promise<T> {
     const token = await this.#lock(k);
     if (token === UNAVAILABLE) return this.#roundTrip(await load()).value; // can't coordinate: fail open
     if (token) {
       try {
-        return await this.#store(k, await load());
+        return await this.#store(k, await load(), seen);
       } finally {
         await this.#unlock(k, token);
       }
@@ -140,14 +167,15 @@ export class ReadThroughCache {
     // Another instance is loading this key: wait for its value instead of piling onto the origin.
     for (const deadline = Date.now() + this.#waitMs; Date.now() < deadline; ) {
       await sleep(25);
-      const cached = await this.#read(k);
-      if (cached === UNAVAILABLE) break;
-      if (cached) return cached.value as T;
+      const read = await this.#read(k);
+      if (read === UNAVAILABLE) break;
+      if (read.entry) return read.entry.value as T;
+      seen = read.seen;
     }
-    return this.#store(k, await load()); // the holder died or is too slow: don't wait forever
+    return this.#store(k, await load(), seen); // the holder died or is too slow: don't wait forever
   }
 
-  #refreshInBackground<T>(k: string, load: () => Promise<T>) {
+  #refreshInBackground<T>(k: string, load: () => Promise<T>, seen: string) {
     if (this.#refreshing.has(k)) return;
     this.#refreshing.add(k);
     // Nobody awaits this: it must never reject, or the unhandled rejection ends the process.
@@ -155,7 +183,7 @@ export class ReadThroughCache {
       const token = await this.#lock(k);
       if (typeof token !== 'string') return; // someone else refreshes, or Redis is down
       try {
-        await this.#store(k, await load());
+        await this.#store(k, await load(), seen);
       } catch (err) {
         this.#report(err); // keep serving the stale value until it expires for good
       } finally {
@@ -175,16 +203,17 @@ export class ReadThroughCache {
     }
   }
 
-  /** Cache a freshly loaded value; returns it as a hit will. */
-  async #store<T>(k: string, loaded: T): Promise<T> {
+  /** Cache a freshly loaded value, unless the key changed since `seen`; returns the value as a hit will. */
+  async #store<T>(k: string, loaded: T, seen: string): Promise<T> {
     const { value, encoded } = this.#roundTrip(loaded);
     if (encoded === null) return value;
     const fresh = Math.round(this.#ttlMs * (1 + this.#jitter * this.#random()));
-    await this.#call(() => this.#redis.set(k, `${Date.now() + fresh}:${encoded}`, 'PX', fresh + this.#staleMs)).catch((err) => this.#report(err));
+    const entry = `${Date.now() + fresh}:${encoded}`;
+    await this.#call(() => this.#redis.eval(STORE_IF_UNCHANGED, 1, k, seen, entry, Math.ceil(fresh + this.#staleMs))).catch((err) => this.#report(err));
     return value;
   }
 
-  async #read(k: string): Promise<Entry | null | typeof UNAVAILABLE> {
+  async #read(k: string): Promise<Observed | typeof UNAVAILABLE> {
     let raw: string | null;
     try {
       raw = await this.#call(() => this.#redis.get(k));
@@ -192,16 +221,17 @@ export class ReadThroughCache {
       this.#report(err);
       return UNAVAILABLE;
     }
-    if (raw === null) return null;
+    if (raw === null) return { entry: null, seen: '' };
+    if (raw.startsWith(TOMBSTONE)) return { entry: null, seen: raw }; // invalidated: a miss
     const sep = raw.indexOf(':');
     const freshUntil = Number(raw.slice(0, sep));
     try {
       if (sep < 1 || !Number.isFinite(freshUntil)) throw new Error('not an entry of this cache');
-      return { value: this.#codec.decode(raw.slice(sep + 1)), freshUntil };
+      return { entry: { value: this.#codec.decode(raw.slice(sep + 1)), freshUntil }, seen: raw.slice(0, sep + 1) };
     } catch (err) {
       // Another format (an old version, another app) or a codec change: a miss, and the next fill overwrites it.
       this.#report(new Error(`cache: unreadable entry ${k}: ${(err as Error).message}`));
-      return null;
+      return { entry: null, seen: raw.slice(0, 64) };
     }
   }
 

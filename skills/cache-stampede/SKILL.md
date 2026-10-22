@@ -59,6 +59,12 @@ get(key, load)
    - Copy `circuit-breaker.ts`, `hooks.ts` and `with-timeout.ts` along with `cache.ts`: they are the kit's shared building blocks.
 3. **Writes.** Run `invalidate(key)` after the transaction commits. For data changed by other services, publish
    the change through the outbox (`outbox-pattern`) and invalidate in its consumer.
+   - A fill or a refresh may have read the old row just before the commit and still be loading. `invalidate` leaves
+     a tombstone for `lockMs`, and every write is conditional: it lands only if the key still holds what the writer
+     saw before it loaded (one Lua script, one key, so Redis Cluster is fine). With a plain `DEL`, the slow fill
+     wrote the old row back after the invalidation, and it was served for a whole TTL.
+   - `createCache` refuses a NaN or negative `timeoutMs`, `staleSec`, `jitter`, `lockMs` or `waitMs`: each one
+     read from an unset environment variable switched the cache off without an error.
 4. **Metrics.** Track hits (fresh and stale), misses, origin loads per key family, lock waits that fell back to
    loading, and `onError` (Redis trouble). A falling hit rate after a deploy usually means a key format changed.
 
@@ -97,6 +103,8 @@ ADR: staleness allowed per key family, invalidation path, key format and version
   instance deletes another's lock.
 - Waiting on a lock forever: when the holder dies, every request for that key hangs.
 - Invalidating before the commit, or only in the instance that made the change.
+- Invalidating with `DEL` while a fill is loading. It read the row before the change, writes after the `DEL`, and
+  the old value is cached for a full TTL. Writes must check that the key is still what they saw.
 - Cache keys without the tenant (or user) when the value depends on who asks.
 - Letting a Redis outage take the site down with it: no timeout, an offline queue, no fallback to the origin.
 - Returning the loaded value on a miss and the decoded one on a hit. Dates, Maps and class instances change type

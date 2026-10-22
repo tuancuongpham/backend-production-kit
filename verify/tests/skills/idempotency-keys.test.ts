@@ -233,5 +233,7 @@ describe('idempotency-keys', () => {
     assert.notEqual(f({ a: 1 }), f({ a: 2 }));
     assert.notEqual(f({ a: 1 }), f({ a: 1 }, '/refunds'));
     assert.notEqual(f([1, 2]), f([2, 1]), 'array order does');
+    // A body built by the app: a Date is fingerprinted as the ISO string it sends.
+    assert.equal(f({ at: new Date('2026-10-22T09:00:00Z') }), f({ at: '2026-10-22T09:00:00.000Z' }));
   });
 });

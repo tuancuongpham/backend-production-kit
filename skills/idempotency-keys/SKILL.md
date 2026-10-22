@@ -65,7 +65,7 @@ POST /orders   Idempotency-Key: 7f0c2a8e-…
      - Pass `signal` to the external call, so it can't outlive the claim.
    - To configure once (`ttlSec`, `staleAfterSec`), create `new IdempotencyKeys({ pool, ttlSec })` and call its
      `run`, `runExternal` and `prune`; the functions above are one-call forms of the same.
-   - Copy `pg-transaction.ts` along with `idempotency.ts`: it is the kit's shared transaction helper, identical in
+   - Copy `pg-transaction.ts` and `pg-values.ts` along with `idempotency.ts`: the kit's shared transaction helper, and the one that makes a stored response hold any text (a NUL echoed from the request would roll back the order and fail every retry the same way). Both are identical in
      every skill that has it.
    - Handlers **return** definitive outcomes, which are stored and replayed, and **throw** on transient failures,
      which store nothing.

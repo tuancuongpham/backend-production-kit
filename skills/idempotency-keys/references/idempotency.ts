@@ -7,6 +7,7 @@
 import { createHash, randomUUID } from 'node:crypto';
 import type pg from 'pg';
 import { withClient } from './pg-transaction.ts';
+import { pgJson } from './pg-values.ts';
 
 export interface IdempotentRequest {
   /** Who is asking: tenant + principal (user or API-key id), from authentication, never from the request body. */
@@ -234,7 +235,9 @@ export class IdempotencyKeys {
       `UPDATE idempotency_keys
           SET status = 'done', response_status = $3, response_body = $4, response_headers = $5
         WHERE scope = $1 AND key = $2 AND status = 'in_progress' AND claim_token = $6`,
-      [req.scope, req.key, res.status, JSON.stringify(res.body ?? null), res.headers ? JSON.stringify(res.headers) : null, token],
+      // A NUL character in the response (echoed user input) is stored as U+FFFD: Postgres can't hold it, and failing
+      // here would roll back the effect and fail every retry the same way.
+      [req.scope, req.key, res.status, pgJson(res.body ?? null), res.headers ? pgJson(res.headers) : null, token],
     );
   }
 }

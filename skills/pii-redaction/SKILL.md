@@ -56,6 +56,11 @@ Use two mechanisms together:
   - a proxy, a `Map` with object keys, or a library error with a non-string message is handled the same way.
 - An error keeps its `code`, its `cause` and a redacted `detail` (`Key (email)=([EMAIL]) already exists`), never
   the rest of its properties. An HTTP client's error carries the request config, Authorization header included.
+- [Property tests](../../verify/tests/properties/redaction.test.ts) cover thousands of generated sentences and
+  objects:
+  - phones, emails, cards and national ids, in any grouping and at any depth, leave no digit and no `@` behind;
+  - redacting twice changes nothing more;
+  - no value makes the redactor throw.
 - Lines with nothing personal in them (order ids, timings, cache keys, trace ids) come out unchanged
   ([regressions/round-4.test.ts](../../verify/tests/regressions/round-4.test.ts)).
 - HMAC placeholders are stable for the same value and differ for different values.

@@ -115,6 +115,10 @@ Against real Postgres. [verify/tests/skills/llm-tool-safety.test.ts](../../verif
   - a supervisor approves from the link, the refund runs once, and a repeated retry replays it;
   - a raised amount, made-up ids, links edited by hand, another shop's supervisor, a decision the API doesn't know,
     and the requester approving their own destructive call: each refused, with nothing run.
+- [Properties](../../verify/tests/properties/model-and-user-input.test.ts) over generated input:
+  - the tool gets arguments that match its schema, or the model gets a `ToolArgumentError`;
+  - any arguments with any tool-call id give the model a result, never an exception;
+  - any approval id from a URL is unknown, never a database error.
 
 How to write these tests so they prove something:
 - Script the model: feed a tool result containing an injected instruction, then make the next call follow it. The

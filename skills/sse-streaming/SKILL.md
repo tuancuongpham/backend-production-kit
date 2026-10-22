@@ -59,6 +59,8 @@ Reference: [references/sse.ts](references/sse.ts), with `hooks.ts`, the kit's sh
   - a feed that reconnects after losing the network: the missed events arrive once, in order;
   - a deploy: the stream ends once traffic has moved, and the feed resumes on the new instance;
   - a `Last-Event-ID` nobody issued: `reset`.
+- [Properties](../../verify/tests/properties/formats.test.ts): any text, any id and any event name round-trip to the
+  browser exactly (a CR or CRLF arrives as LF), and an id or event with a line break is refused.
 
 Manually: throttle the network in browser devtools and toggle offline; the UI should resume without duplicate or missing tokens. Behind the real proxy or CDN, confirm tokens arrive incrementally rather than all at once at the end (a buffering proxy).
 

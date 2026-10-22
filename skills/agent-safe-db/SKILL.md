@@ -73,6 +73,9 @@ Write these as automated tests against a real Postgres (Docker), not mocks. [ver
 - Unknown tool, extra param, or malformed uuid → rejected before touching the DB, and audited.
 - A string with a NUL and an impossible date (`2026-02-31`, `2026-02-29`) are `ToolInputError`s, while `2028-02-29`
   passes ([regressions/round-4.test.ts](../../verify/tests/regressions/round-4.test.ts)).
+- [Property test](../../verify/tests/properties/model-and-user-input.test.ts): for any value a model sends for a text,
+  date, uuid or number parameter, the executor's check refuses it first or Postgres accepts it. That includes
+  1,000 generated dates with impossible days, a 24th hour and odd offsets. A database error is never the answer.
 - Row cap → `truncated: true`.
 - A database that accepts the connection but never answers → the tool call fails in about the connect timeout
   instead of hanging; the server ending an idle pooled connection → the process keeps running and the next call

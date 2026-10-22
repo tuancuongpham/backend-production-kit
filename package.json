@@ -10,10 +10,18 @@
   "scripts": {
     "verify:up": "docker compose -f verify/docker-compose.yml up -d --wait",
     "verify:down": "docker compose -f verify/docker-compose.yml down -v",
-    "test": "node --test --test-concurrency=1 \"verify/tests/**/*.test.ts\"",
-    "test:unit": "node --test verify/tests/skills/pii-redaction.test.ts verify/tests/skills/llm-gateway.test.ts verify/tests/skills/service-hardening.test.ts verify/tests/skills/sse-streaming.test.ts verify/tests/skills/llm-observability.test.ts verify/tests/skills/adr-writer.test.ts",
+    "check": "npm run validate && npm run typecheck && npm run lint",
     "validate": "node scripts/validate-skills.mjs",
     "typecheck": "tsc -p tsconfig.json",
+    "lint": "eslint .",
+    "test": "node --test --test-concurrency=1 \"verify/tests/**/*.test.ts\"",
+    "test:unit": "node --test verify/tests/kernel/hooks.test.ts verify/tests/kernel/with-timeout.test.ts verify/tests/kernel/circuit-breaker.test.ts verify/tests/kernel/worker-loop.test.ts verify/tests/kernel/pg-values.test.ts verify/tests/skills/pii-redaction.test.ts verify/tests/skills/llm-gateway.test.ts verify/tests/skills/service-hardening.test.ts verify/tests/skills/sse-streaming.test.ts verify/tests/skills/llm-observability.test.ts verify/tests/skills/adr-writer.test.ts verify/tests/properties/redaction.test.ts verify/tests/properties/numbers.test.ts",
+    "test:skills": "node --test --test-concurrency=1 \"verify/tests/skills/*.test.ts\"",
+    "test:kernel": "node --test --test-concurrency=1 \"verify/tests/kernel/*.test.ts\"",
+    "test:journeys": "node --test --test-concurrency=1 \"verify/tests/journeys/*.test.ts\"",
+    "test:properties": "node --test --test-concurrency=1 \"verify/tests/properties/*.test.ts\"",
+    "test:regressions": "node --test --test-concurrency=1 \"verify/tests/regressions/*.test.ts\" \"verify/tests/invariants/*.test.ts\"",
+    "coverage": "node scripts/coverage.mjs",
     "sync:shared": "node scripts/sync-shared.mjs",
     "bench": "node bench/run.ts",
     "bench:docker": "node scripts/bench-docker.mjs"
@@ -27,9 +35,13 @@
     "pg": "^8.16.0"
   },
   "devDependencies": {
+    "@eslint/js": "^9.39.5",
     "@types/node": "^24.19.2",
     "@types/pg": "^8.23.1",
+    "eslint": "^9.39.5",
     "fast-check": "^4.10.2",
-    "typescript": "^5.9.3"
+    "globals": "^17.13.0",
+    "typescript": "^5.9.3",
+    "typescript-eslint": "^8.72.0"
   }
 }

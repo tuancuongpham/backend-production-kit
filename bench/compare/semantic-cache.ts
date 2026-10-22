@@ -43,7 +43,7 @@ await builder.query(`SET maintenance_work_mem = '1GB'`);
 // the 1 GB graph in /dev/shm, and Docker's default 64 MB shm fails with "could not resize shared memory
 // segment". Build serially here; in your own container raise --shm-size instead.
 await builder.query(`SET max_parallel_maintenance_workers = 0`);
-let t0 = performance.now();
+const t0 = performance.now();
 await builder.query(`CREATE INDEX llm_semantic_cache_vec_idx ON llm_semantic_cache USING hnsw (embedding vector_cosine_ops)`);
 const buildSec = Math.round((performance.now() - t0) / 100) / 10;
 await builder.query(`ANALYZE llm_semantic_cache`);

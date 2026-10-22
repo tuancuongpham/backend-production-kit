@@ -83,7 +83,7 @@ describe('rag-evals', () => {
     assert.equal(verdict.pass, false);
     assert.ok(verdict.failures.some((f) => f.startsWith('recall in "accents" fell')), verdict.failures.join('; '));
     assert.equal(broken.byTag['no-accents'].recall, 1, 'queries typed without accents still work, so a spot check would pass');
-    assert.ok(verdict.regressed.every((r) => /[^\x00-\x7f]/.test(r.query)), 'only accented queries lost results');
+    assert.ok(verdict.regressed.every((r) => /[^\p{ASCII}]/u.test(r.query)), 'only accented queries lost results');
     assert.match(toMarkdown(baseline, broken, verdict), /\*\*Retrieval eval: FAIL\*\*/);
   });
 

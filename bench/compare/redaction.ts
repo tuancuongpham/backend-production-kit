@@ -47,7 +47,12 @@ const rate = (fn: (s: string) => string, inputs: string[], minMs = 400) => {
   for (let i = 0; i < 2000; i++) fn(inputs[i % inputs.length]);
   let n = 0;
   const t0 = performance.now();
-  while (performance.now() - t0 < minMs) for (const s of inputs) (fn(s), n++);
+  while (performance.now() - t0 < minMs) {
+    for (const s of inputs) {
+      fn(s);
+      n++;
+    }
+  }
   return Math.round((n / (performance.now() - t0)) * 1000);
 };
 

@@ -22,7 +22,7 @@ const golden = (pairs: string[][], idPrefix: string, tag?: string) =>
     id: `${idPrefix}${i + 1}`,
     query,
     relevant: [chunk],
-    tags: [tag ?? (/[^\x00-\x7f]/.test(query) ? 'accents' : 'no-accents')],
+    tags: [tag ?? (/[^\p{ASCII}]/u.test(query) ? 'accents' : 'no-accents')],
   }));
 
 /** Search-box style: a few keywords. */

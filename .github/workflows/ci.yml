@@ -14,18 +14,28 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
-  validate-skills:
-    # frontmatter rules enforced on skill upload, links, eval sets
+  check:
+    # Fast, no services: what a pull request gets told first.
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v5
       - uses: actions/setup-node@v5
         with:
           node-version-file: .nvmrc
-      - name: Validate skills, links and eval sets
-        run: node scripts/validate-skills.mjs
+          cache: npm
+      - name: Install dependencies
+        run: npm ci
+      - name: Validate skills, links, eval sets and shared-kernel copies
+        run: npm run validate
+      - name: Type-check the reference code, tests and benchmarks (Node strips types without checking them)
+        run: npm run typecheck
+      - name: Lint for bug classes (floating promises, missing awaits, inexhaustive switches)
+        run: npm run lint
+      - name: Tests that need no infrastructure
+        run: npm run test:unit
 
   verify:
+    needs: check
     runs-on: ubuntu-latest
     services:
       postgres:
@@ -73,11 +83,8 @@ jobs:
       - name: Install dependencies
         run: npm ci
 
-      - name: Type-check the reference code (Node strips types without checking them)
-        run: npm run typecheck
-
-      - name: Verification tests (real Postgres + Redis)
-        run: npm test
+      - name: Every test against real Postgres, Redis and Toxiproxy, with coverage thresholds
+        run: npm run coverage
 
       - name: Benchmarks (informational)
         run: node bench/run.ts ci

@@ -269,14 +269,14 @@ export class JobWorker {
     const timer = setTimeout(() => ac.abort(new Error(`job timed out after ${this.#timeoutMs} ms`)), this.#timeoutMs);
     // Rejects when the signal aborts, so a handler that ignores it can't hold the loop forever. The catch keeps
     // a late abort (after the handler won the race) from becoming an unhandled rejection.
-    const aborted = new Promise<never>((_, reject) => ac.signal.addEventListener('abort', () => reject(ac.signal.reason), { once: true }));
+    const aborted = new Promise<never>((_, reject) => ac.signal.addEventListener('abort', () => reject(ac.signal.reason as Error), { once: true }));
     aborted.catch(() => {});
     try {
       const handler = this.#handlers[job.kind];
       if (!handler) throw new Error(`no handler for job kind "${job.kind}"`);
       await Promise.race([handler(job, { signal: ac.signal }), aborted]);
     } catch (err) {
-      return this.#fail(job, err);
+      return await this.#fail(job, err);
     } finally {
       clearTimeout(timer);
     }

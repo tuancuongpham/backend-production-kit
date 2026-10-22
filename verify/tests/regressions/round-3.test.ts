@@ -275,7 +275,7 @@ describe('latent bugs, round 3', () => {
       const guard = toolGuard.createToolGuard({ pool, tools });
       const s = guard.session({ tenantId: 't1', userId: 'u1', sessionId: 'conv-2' });
       const ask = (await s.call('delete_customer', { customerId: 'c-1' }, { toolCallId: 'call-d1' })) as { approvalId: string };
-      assert.equal(await (guard.decide as Function)(ask.approvalId, { tenantId: 't1', userId: 'admin-2' }, 'approved'), true);
+      assert.equal(await guard.decide(ask.approvalId, { tenantId: 't1', userId: 'admin-2' }, 'approved'), true);
       const first = await s.call('delete_customer', { customerId: 'c-1' }, { toolCallId: 'call-d1', approvalId: ask.approvalId });
       assert.deepEqual(first, { status: 'ok', result: { deleted: 1 } });
       const retry = await s.call('delete_customer', { customerId: 'c-1' }, { toolCallId: 'call-d1', approvalId: ask.approvalId });
@@ -285,7 +285,7 @@ describe('latent bugs, round 3', () => {
     it("an approver from another tenant can't decide this tenant's approval", async () => {
       const guard = toolGuard.createToolGuard({ pool, tools });
       const ask = (await guard.session({ tenantId: 't1', userId: 'u1', sessionId: 'conv-3' }).call('delete_customer', { customerId: 'c-1' })) as { approvalId: string };
-      assert.equal(await (guard.decide as Function)(ask.approvalId, { tenantId: 't2', userId: 'admin-of-t2' }, 'approved'), false);
+      assert.equal(await guard.decide(ask.approvalId, { tenantId: 't2', userId: 'admin-of-t2' }, 'approved'), false);
     });
 
     it('a tool call id left "running" by a crashed process can be retried after a while', async () => {

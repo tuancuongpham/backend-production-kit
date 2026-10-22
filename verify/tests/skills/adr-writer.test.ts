@@ -6,7 +6,7 @@ import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { promisify } from 'node:util';
-// @ts-ignore — plain JS module
+// @ts-expect-error -- plain JavaScript, without type declarations
 import { fillTemplate, slugify } from '../../../skills/adr-writer/scripts/new-adr.mjs';
 
 const run = promisify(execFile);

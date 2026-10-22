@@ -62,14 +62,11 @@ jobs:
       - name: Install dependencies
         run: npm ci
 
-      - name: Validate skills
-        run: node scripts/validate-skills.mjs
+      - name: Validate, type-check and lint (the same checks as CI)
+        run: npm run check
 
-      - name: Type-check the reference code
-        run: npm run typecheck
-
-      - name: Verification tests
-        run: npm test
+      - name: Every test, with coverage thresholds
+        run: npm run coverage
 
       - name: Package skills
         # a .skill file is a zip of one skill folder: upload it on claude.ai, or unzip into ~/.claude/skills

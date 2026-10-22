@@ -150,7 +150,8 @@ export class ReadThroughCache {
   #refreshInBackground<T>(k: string, load: () => Promise<T>) {
     if (this.#refreshing.has(k)) return;
     this.#refreshing.add(k);
-    (async () => {
+    // Nobody awaits this: it must never reject, or the unhandled rejection ends the process.
+    void (async () => {
       const token = await this.#lock(k);
       if (typeof token !== 'string') return; // someone else refreshes, or Redis is down
       try {

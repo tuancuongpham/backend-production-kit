@@ -180,6 +180,18 @@ export function costUsd(prices: PriceTable, model: string, u: Usage): number {
   return (u.inputTokens * p.inputPer1M + u.outputTokens * p.outputPer1M) / 1_000_000;
 }
 
+/**
+ * Token counts that can be priced, or null. Some SDKs return a streamed or cached answer without usage, or with a
+ * count missing: priced as is, that is NaN dollars, and NaN in a budget row never compares true again.
+ */
+function countedUsage(u: Partial<Usage> | undefined): Usage | null {
+  const ok = (n: unknown): n is number => typeof n === 'number' && Number.isFinite(n) && n >= 0;
+  return u && ok(u.inputTokens) && ok(u.outputTokens) ? { inputTokens: u.inputTokens, outputTokens: u.outputTokens } : null;
+}
+
+/** A cached answer as the caller gets it: without the question that produced it, which another user may have asked. */
+const answerOf = (v: CachedResponse): CachedResponse => ({ content: v.content, model: v.model, provider: v.provider });
+
 /** Deliberately pessimistic: a reservation that's too small lets concurrent requests overshoot. */
 export function defaultEstimateUsd(prices: PriceTable, models: string[], req: ChatRequest): number {
   const chars = req.messages.reduce((n, m) => n + m.content.length, 0);
@@ -198,7 +210,17 @@ interface SemanticLookup {
 
 /** A budget reservation for one call: settled once with the real cost, or released (settled at 0). */
 interface Reservation {
+  /** What was reserved: booked as the cost when the provider's answer comes without usable token counts. */
+  estimateUsd: number;
   settle(actualUsd: number): Promise<void>;
+}
+
+/** A dollar amount from the app (a plan's limit, an estimate): a finite number of 0 or more, else the call is refused. */
+function dollars(what: string, usd: unknown): number {
+  if (typeof usd !== 'number' || !Number.isFinite(usd) || usd < 0) {
+    throw new Error(`llm-gateway: ${what} is ${String(usd)}, not an amount of dollars: the budget can't be enforced, so the call is refused`);
+  }
+  return usd;
 }
 
 export class LlmGateway {
@@ -229,20 +251,30 @@ export class LlmGateway {
       const unpriced = o.providers.map((p) => p.model).filter((m) => !o.prices[m]);
       if (unpriced.length) throw new Error(`llm-gateway: no price configured for model(s) ${unpriced.join(', ')}; budgets cannot be enforced`);
     }
+    // A number read from an unset environment variable is NaN. A NaN timeout fails every provider (and opens their
+    // breakers), a NaN TTL caches nothing, and a threshold of NaN, or 95 meant as 95%, never matches.
+    const setting = (name: string, v: number, ok: boolean, rule: string) => {
+      if (!ok) throw new RangeError(`llm-gateway: ${name} must be ${rule}, got ${v}`);
+      return v;
+    };
+    const timeoutMs = o.timeoutMs ?? 60_000;
+    const threshold = o.semanticThreshold ?? 0.95;
+    const ttlSec = o.cacheTtlSec ?? 86_400;
+    const fallbackTtlSec = o.fallbackCacheTtlSec ?? 300;
+    this.#timeoutMs = setting('timeoutMs', timeoutMs, Number.isInteger(timeoutMs) && timeoutMs >= 1 && timeoutMs <= 2 ** 31 - 1, 'a whole number of ms');
+    this.#threshold = setting('semanticThreshold', threshold, threshold > 0 && threshold <= 1, 'a cosine similarity above 0 and at most 1 (0.95, not 95)');
+    this.#ttlSec = setting('cacheTtlSec', ttlSec, Number.isFinite(ttlSec) && ttlSec >= 0, 'a number of seconds, 0 or more');
+    this.#fallbackTtlSec = setting('fallbackCacheTtlSec', fallbackTtlSec, Number.isFinite(fallbackTtlSec) && fallbackTtlSec >= 0, 'a number of seconds, 0 or more');
     this.#providers = o.providers;
     this.#prices = o.prices;
     this.#cache = o.cache;
     this.#embed = o.embed;
     this.#semanticMode = o.semanticMode ?? 'shadow';
-    this.#threshold = o.semanticThreshold ?? 0.95;
-    this.#ttlSec = o.cacheTtlSec ?? 86_400;
-    this.#fallbackTtlSec = o.fallbackCacheTtlSec ?? 300;
     this.#budget = o.budget;
     this.#onShadowHit = o.onShadowHit;
     this.#onUsage = o.onUsage;
     this.#onUsageError = o.onUsageError;
     this.#onError = o.onError;
-    this.#timeoutMs = o.timeoutMs ?? 60_000;
     this.#now = o.now ?? Date.now;
     const breaker = o.breaker ?? { threshold: 3, cooldownMs: 30_000 };
     this.#breakers = new Map(o.providers.map((p) => [p.name, new CircuitBreaker({ ...breaker, now: this.#now })]));
@@ -262,7 +294,7 @@ export class LlmGateway {
       const hit = await this.#bestEffort('cache-read', () => this.#cache!.getExact(exactKey), null);
       if (hit) {
         record({ provider: hit.provider, model: hit.model, cache: 'exact', inputTokens: 0, outputTokens: 0, costUsd: 0, fallbackFrom: [], ok: true });
-        return { ...hit, cache: 'exact', costUsd: 0, fallbackFrom: [] };
+        return { ...answerOf(hit), cache: 'exact', costUsd: 0, fallbackFrom: [] };
       }
       const question = this.#semanticText(req);
       if (question !== null && this.#embed && this.#semanticMode !== 'off') {
@@ -271,7 +303,9 @@ export class LlmGateway {
           const { similar } = await semantic;
           if (similar) {
             record({ provider: similar.value.provider, model: similar.value.model, cache: 'semantic', inputTokens: 0, outputTokens: 0, costUsd: 0, fallbackFrom: [], ok: true });
-            return { ...similar.value, cache: 'semantic', similarity: similar.similarity, costUsd: 0, fallbackFrom: [] };
+            // The entry keeps the question it was cached for (to label shadow hits). That question may be another
+            // user's, with their name and order in it: the caller gets the answer only.
+            return { ...answerOf(similar.value), cache: 'semantic', similarity: similar.similarity, costUsd: 0, fallbackFrom: [] };
           }
         }
         // Shadow mode: the lookup keeps running beside the model call and reports what it would have served.
@@ -284,13 +318,19 @@ export class LlmGateway {
       // 3. Provider chain.
       const { provider, completion, fallbackFrom } = await this.#callChain(req, ctx, record);
       // The answer exists and is paid for. Nothing below may fail the request or buy it again elsewhere.
-      const cost = costUsd(this.#prices, provider.model, completion.usage);
+      const usage = countedUsage(completion.usage);
+      let cost = usage ? costUsd(this.#prices, provider.model, usage) : Number.NaN;
+      if (!Number.isFinite(cost)) {
+        // Unknown cost: book the pessimistic estimate, so the budget stays a number and errs on the safe side.
+        cost = reservation?.estimateUsd ?? defaultEstimateUsd(this.#prices, [provider.model], req);
+        this.#report(new Error(`llm-gateway: ${provider.name} answered without usable token counts; booked the estimate of $${cost}`), 'usage');
+      }
       await reservation?.settle(cost);
       const value: CachedResponse = { content: completion.content, model: provider.model, provider: provider.name };
       if (cacheable) await this.#remember(scope, exactKey, value, semantic, fallbackFrom.length > 0);
       const cache = cacheable ? 'miss' : 'bypass';
-      record({ provider: provider.name, model: provider.model, cache, ...completion.usage, costUsd: cost, fallbackFrom, ok: true });
-      return { ...value, cache, usage: completion.usage, costUsd: cost, fallbackFrom };
+      record({ provider: provider.name, model: provider.model, cache, ...(usage ?? { inputTokens: 0, outputTokens: 0 }), costUsd: cost, fallbackFrom, ok: true });
+      return { ...value, cache, ...(usage ? { usage } : {}), costUsd: cost, fallbackFrom };
     } finally {
       await reservation?.settle(0); // no-op after a successful settle; releases the reservation on failure
     }
@@ -338,15 +378,25 @@ export class LlmGateway {
     if (!budget) return null;
     // Settle in the period we reserved in, even if the month rolls over while the model generates.
     const period = new Date(this.#now()).toISOString().slice(0, 7); // 'YYYY-MM'
-    const limit = await budget.monthlyLimitUsd(ctx.tenantId);
-    const estimate = budget.estimateUsd?.(req) ?? defaultEstimateUsd(this.#prices, this.#providers.map((p) => p.model), req);
-    // A budget store that is down fails the request: a budget is a control, and it fails closed.
+    // A budget is a control, and it fails closed: a store that is down fails the request, and so does a limit or an
+    // estimate that isn't a number. A plan missing from the table gives NaN, which compares false in JavaScript and
+    // above every amount in Postgres numeric: either way, every reservation would pass.
+    let limit: number;
+    let estimate: number;
+    try {
+      limit = dollars(`monthlyLimitUsd(${ctx.tenantId})`, await budget.monthlyLimitUsd(ctx.tenantId));
+      estimate = dollars('the cost estimate', budget.estimateUsd?.(req) ?? defaultEstimateUsd(this.#prices, this.#providers.map((p) => p.model), req));
+    } catch (err) {
+      record({ provider: null, model: null, cache: 'bypass', inputTokens: 0, outputTokens: 0, costUsd: 0, fallbackFrom: [], ok: false, error: 'budget misconfigured' });
+      throw err;
+    }
     if (!(await budget.store.reserve(ctx.tenantId, period, estimate, limit))) {
       record({ provider: null, model: null, cache: 'bypass', inputTokens: 0, outputTokens: 0, costUsd: 0, fallbackFrom: [], ok: false, error: 'budget exceeded' });
       throw new BudgetExceededError(`monthly LLM budget of $${limit} reached for tenant ${ctx.tenantId}`);
     }
     let settled = false;
     return {
+      estimateUsd: estimate,
       settle: async (actualUsd) => {
         if (settled) return;
         settled = true;

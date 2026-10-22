@@ -27,9 +27,18 @@ LLM APIs are the most expensive and least reliable dependency most apps have. Th
    - **Exact cache** on `sha256(scope, messages, params)`. For "summarize X" features this also means *unchanged input is never re-summarized*. That is often the single biggest saving, and a frequent cause of a sudden 3× bill (re-summarizing on every view).
    - **Semantic cache**:
      - only for single-question requests, because in multi-turn chats the history changes the meaning;
+     - a hit returns the cached answer only. The entry also keeps the question it was cached for, to label shadow
+       hits, and that question may be another user's, with their name and order number in it;
      - `semanticMode` defaults to **`'shadow'`**: look up, report would-be hits through `onShadowHit` (question, cached question, similarity) for labelling, but still call the model. Switch to `'serve'` only after the eval below passes. In shadow mode the embedding and lookup run beside the model call, so they add no latency (a 100 ms embedding with a 100 ms model: 108 ms per request instead of 206 ms);
      - an optional extra guard is to reject hits whose negation words or numbers differ from the cached question. It is a heuristic, and it doesn't replace the eval.
    - **Budget, reserve then settle**: before calling a provider, atomically reserve a *pessimistic* cost estimate (`spent + reserved + estimate ≤ limit`, else `BudgetExceededError` with no provider call). Settle with the real cost afterwards; a failed call releases the reservation. A read-then-call check lets N concurrent requests all pass and overshoot by N × cost. Over-estimating is safe; under-estimating lets concurrency overshoot.
+     - The limit and the estimate must be numbers of dollars, or the call is refused. A plan missing from the table
+       (`plans[tenant]?.limitUsd * 1`) is NaN: NaN compares false in JavaScript and above every amount in Postgres
+       `numeric`, so either store let every reservation through.
+     - An answer without usable token counts (some SDKs return streamed or cached answers without `usage`) is booked
+       at the reserved estimate and reported to `onError(err, 'usage')`. Priced as is, it was NaN dollars: in
+       Postgres, `spent_usd` became NaN and refused every later call of that tenant; in memory, the limit stopped
+       limiting.
    - **Provider chain**: per-attempt timeout; fall back on 408/409/429/5xx/timeout. Don't fall back on 4xx (our bug, same everywhere). Caller cancellation (`signal`) stops the chain, and a request already cancelled is never sent.
      - A circuit breaker per provider skips a failing vendor. After its cooldown it lets **one probe** through while the other requests go straight to the fallback; without that half-open state, every request waiting at that moment calls the dead vendor and waits out its timeout.
      - Answers from a fallback provider are cached for `fallbackCacheTtlSec` (default 300 s), not the full TTL: they shouldn't outlive the outage.
@@ -37,6 +46,8 @@ LLM APIs are the most expensive and least reliable dependency most apps have. Th
    - **Optional infrastructure fails open**: a cache store or embedding API that is down means no cache for that request, not a failed request. The budget store is a control and fails closed: if the reservation can't be made, the request fails.
    - **Cost** comes from a price table **in config**. Prices change; a missing price shows up as cost 0 and should alert.
    - **Accounting never fails a request**: `onUsage` errors, sync or async, are caught and passed to `onUsageError` (or `onError`).
+   - `createGateway` refuses a NaN timeout or TTL and a `semanticThreshold` outside (0, 1] with a `RangeError`: a NaN
+     timeout failed every provider and opened their breakers, and a threshold of 95, meant as 95%, never matched.
    - Copy `circuit-breaker.ts`, `hooks.ts`, `pg-transaction.ts` and `pg-values.ts` along with the gateway files: they are the kit's shared building blocks, identical in every skill that has them.
 2. **Stores**: [references/semantic-cache.sql](references/semantic-cache.sql) + [references/pg-stores.ts](references/pg-stores.ts):
    - Postgres/pgvector exact and semantic caches (Redis is a fine alternative for the exact cache);
@@ -98,6 +109,10 @@ ADR: build vs buy, fallback chain and its quality trade-off, semantic cache thre
 - Checking the budget with a read (`SELECT sum(cost)`) and then calling: under load, every in-flight request passes the check.
 - Turning the semantic cache on in `serve` mode on day one, with a threshold nobody measured.
 - A model missing from the price table. Its estimate and cost are $0, so the budget silently never limits anything. The reference gateway refuses to start with budgets on and an unpriced model.
+- A budget limit or a cost that can be NaN. NaN never compares true: one answer without usage priced at NaN locked
+  the tenant out in Postgres for the rest of the month, and a NaN limit lifted it in memory. Refuse a limit that
+  isn't a number, and book the estimate when the cost is unknown.
+- Returning the cached entry as it is stored. It held the question of the user who first asked, name and all.
 - Computing the budget period twice (once at reserve, once at settle). A call that crosses midnight at month end leaves its reservation stuck in the old month forever. Capture the period once per call.
 - An HNSW index with a tenant filter on top (`ORDER BY embedding <=> $1 … WHERE scope = $2`). It looks like the textbook query and returns fast, but it misses the tenant's own entries exactly when a question is popular, so the cache fails where it would save the most.
 - Sending embeddings as `'[0.0123,…]'` text: 32 KB per 1536-dim vector, parsed on every query. Send a binary parameter.

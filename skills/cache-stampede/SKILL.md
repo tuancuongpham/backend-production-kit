@@ -86,6 +86,9 @@ Against real Redis. [verify/tests/skills/cache-stampede.test.ts](../../verify/te
 - [regressions/round-6.test.ts](../../verify/tests/regressions/round-6.test.ts): a fill, and a background refresh,
   that read the old row before the commit and finish after `invalidate()` don't overwrite it; the next read loads the
   new row.
+- [regressions/round-7.test.ts](../../verify/tests/regressions/round-7.test.ts): a `timeoutMs` Node can't schedule
+  (past about 24.8 days) is refused: it fired after 1 ms, every Redis call failed, and the cache was off. The
+  breaker's cooldown survives a wall clock stepped back: one probe after the cooldown, not after the step.
 
 How to write these tests so they prove something:
 - Fire the requests concurrently against an origin that takes long enough to overlap them, and count origin calls.

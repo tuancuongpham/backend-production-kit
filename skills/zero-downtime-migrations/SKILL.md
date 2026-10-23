@@ -88,6 +88,9 @@ Against real Postgres. [verify/tests/skills/zero-downtime-migrations.test.ts](..
 - [regressions/round-6.test.ts](../../verify/tests/regressions/round-6.test.ts): an unnamed concurrent unique index
   that fails leaves no INVALID index; a quoted identifier with a `;` stays in its statement; `TRUNCATE` is flagged;
   NaN attempts and retries and `batchSize: 0` are `RangeError`s.
+- [regressions/round-7.test.ts](../../verify/tests/regressions/round-7.test.ts): a backfill of 25 rows in batches of 10,
+  with the app deleting one row the first batch waits for, updates the other 24 (before: 9, then "done"); a `pauseMs`
+  Node can't schedule is a `RangeError`.
 
 How to write these tests so they prove something:
 - Hold a lock from a second connection (an open transaction) and time a third query. A migration that runs fine on

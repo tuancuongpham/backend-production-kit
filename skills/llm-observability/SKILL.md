@@ -39,7 +39,7 @@ Use OpenTelemetry as the backbone, because it is vendor-neutral and auto-instrum
 - A 240 KB prompt is stored as at most 32 KiB per attribute, marked as truncated ([regressions/round-2.test.ts](../../verify/tests/regressions/round-2.test.ts)).
 - An error sets status ERROR with an exception event and rethrows. With `redact`, the exception's message and stack
   go through it like the prompt: a database error naming the customer's email, or a provider's 400 quoting the
-  prompt, reached the trace backend in clear before.
+  prompt, reached the trace backend in clear before ([regressions/round-7.test.ts](../../verify/tests/regressions/round-7.test.ts)).
   A failure that isn't an `Error` is recorded as its text, and a redactor that throws loses the text, not the failure.
 - A reply without text (`content: null`, a tool call) passed through the redactor → the call succeeds and returns the reply ([regressions/round-3.test.ts](../../verify/tests/regressions/round-3.test.ts)).
 - Trace context survives an async hop: the consumer span has the producer's trace id and parent span id.

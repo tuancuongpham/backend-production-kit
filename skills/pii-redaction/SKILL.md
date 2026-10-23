@@ -65,7 +65,8 @@ Use two mechanisms together:
 - An error keeps its `code`, its `cause` and a redacted `detail` (`Key (email)=([EMAIL]) already exists`), never
   the rest of its properties. An HTTP client's error carries the request config, Authorization header included.
   An `AggregateError` keeps its `errors`, redacted: what a job scheduler's tick throws when schedules fail only
-  named them in its message, and why each one failed was lost.
+  named them in its message, and why each one failed was lost
+  ([regressions/round-7.test.ts](../../verify/tests/regressions/round-7.test.ts)).
 - [Property tests](../../verify/tests/properties/redaction.test.ts) cover thousands of generated sentences and
   objects:
   - phones, emails, cards and national ids, in any grouping and at any depth, leave no digit and no `@` behind;
@@ -76,7 +77,8 @@ Use two mechanisms together:
 - HMAC placeholders are stable for the same value and differ for different values.
 - The real logger configuration (pino hooks) redacts both merged objects and message strings, and every argument a
   message interpolates: pino formats `logger.info('order %j', order)` after its hook, and `formatters.log` never sees
-  the result, so the order's email was logged in clear. An `Error` passed to `%s` becomes its redacted text.
+  the result, so the order's email was logged in clear. An `Error` passed to `%s` becomes its redacted text
+  ([regressions/round-7.test.ts](../../verify/tests/regressions/round-7.test.ts)).
 - A custom detector without the `g` flag, or a hint with it, is refused at startup ([regressions/round-3.test.ts](../../verify/tests/regressions/round-3.test.ts)).
 - **End-to-end**: trigger an error in a request containing an email and a card number, then grep the captured log output and the error-tracker payload. Neither raw value should be present.
 

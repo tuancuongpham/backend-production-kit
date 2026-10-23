@@ -71,6 +71,9 @@ Against real Postgres. [verify/tests/skills/webhook-ingestion.test.ts](../../ver
 - Reconciliation ingests only missing events and reports the count. `pruneInbox` deletes old `done` rows only, never recent ones or dead letters.
 - A `toleranceSec` of NaN throws instead of accepting a year-old signature, and NaN retry delays are refused at
   startup ([regressions/round-6.test.ts](../../verify/tests/regressions/round-6.test.ts)).
+- A claimed event whose lease passed to another worker before its turn in the batch isn't run by this one: `lost`,
+  and its handler never sees it. `pruneInbox` refuses `batchSize: 0` (a loop that never ended) and a window under a
+  day ([regressions/round-7.test.ts](../../verify/tests/regressions/round-7.test.ts)).
 
 How to write these tests so they prove something:
 - **Sign test payloads with the provider's own tooling**: Stripe's `stripe.webhooks.generateTestHeaderString`, or a payload and signature captured from the provider's sandbox. A test that signs with the same HMAC code the verifier uses passes even when both share a bug (wrong field order, wrong encoding).

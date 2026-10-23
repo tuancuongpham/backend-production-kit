@@ -93,6 +93,9 @@ Against real Postgres and Redis. [verify/tests/skills/data-retention-and-erasure
   - an `anonymize` entry that leaves `shipping_address` in place is refused at startup.
 - [regressions/round-6.test.ts](../../verify/tests/regressions/round-6.test.ts): a store that never answers is timed
   out, so `requestErasure` and `processPending` return with it still pending.
+- [regressions/round-7.test.ts](../../verify/tests/regressions/round-7.test.ts): on a table partitioned by time,
+  retention deletes the 5 expired rows and keeps the 5 fresh ones that share their `ctid`s (before: all 10 gone);
+  `runRetention(0)` and a `storeTimeoutMs` Node can't schedule are refused.
 
 How to write these tests so they prove something:
 - Prove absence by searching **every** text-like column for the person's identifiers, not only the tables you

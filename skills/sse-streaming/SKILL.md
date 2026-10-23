@@ -67,6 +67,8 @@ Reference: [references/sse.ts](references/sse.ts), with `hooks.ts`, the kit's sh
 - [regressions/round-6.test.ts](../../verify/tests/regressions/round-6.test.ts): NaN `heartbeatMs`,
   `maxBufferedBytes` and `maxQueue` are refused; an event without data is sent with an empty data field instead of
   throwing a `TypeError`.
+- [regressions/round-7.test.ts](../../verify/tests/regressions/round-7.test.ts): a `heartbeatMs` of 30 days (someone's
+  "never") is refused. Node runs a timer past 2,147,483,647 ms after 1 ms, so it pinged every millisecond.
 
 Manually: throttle the network in browser devtools and toggle offline; the UI should resume without duplicate or missing tokens. Behind the real proxy or CDN, confirm tokens arrive incrementally rather than all at once at the end (a buffering proxy).
 

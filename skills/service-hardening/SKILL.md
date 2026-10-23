@@ -79,6 +79,9 @@ The full go-live list is in [references/checklist.md](references/checklist.md).
 - [regressions/round-6.test.ts](../../verify/tests/regressions/round-6.test.ts): a request arriving during the drain
   delay gets 200 and `Connection: close`, not a 503; a NaN `maxInFlight`, `drainDelayMs` or `shutdownGraceMs` is
   refused at startup; `listen()` on a taken port rejects with `EADDRINUSE`.
+- [regressions/round-7.test.ts](../../verify/tests/regressions/round-7.test.ts): a shutdown hook that never settles
+  doesn't keep `shutdown()` from finishing, and the hook after it still runs; `drainDelayMs`, `shutdownGraceMs` and
+  `keepAliveTimeoutMs` past what Node can schedule are refused.
 
 Then **load-test** the real service (k6/autocannon) at 2× expected peak. Record p50/p95/p99, error rate and the in-flight cap where shedding starts; the `adr-writer` benchmark template has the format. Finally, do a rolling deploy under load and confirm zero 5xx caused by the deploy.
 

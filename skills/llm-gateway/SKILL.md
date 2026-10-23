@@ -95,6 +95,10 @@ LLM APIs are the most expensive and least reliable dependency most apps have. Th
   - a monthly limit of NaN refuses the call without calling the model, with the memory and the Postgres budget;
   - answers without token counts are booked at the estimate: the next call succeeds, and `spent_usd` stays a number;
   - a semantic hit doesn't carry the question another user asked.
+- [regressions/round-7.test.ts](../../verify/tests/regressions/round-7.test.ts): with an embedding API that never
+  answers, the default shadow mode returns the model's answer after `cacheTimeoutMs` (before: never); with a cache
+  store that never answers, the model answers the request; `pruneLlmCache(pool, 0)` is a `RangeError`, not a loop
+  that never ends.
 
 When writing your own tests: make the concurrency test real (requests in flight together, e.g. a provider that sleeps), and inject a failing usage sink. Code inspection alone doesn't prove either property.
 

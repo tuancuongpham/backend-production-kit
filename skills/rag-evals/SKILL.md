@@ -83,6 +83,10 @@ golden set (real queries → relevant chunk ids, tagged by type)
   `$&`, `$'` or `{{context}}` reaches the judge prompt as written.
 - [regressions/round-6.test.ts](../../verify/tests/regressions/round-6.test.ts): a gate threshold of NaN throws
   instead of passing a regression.
+- [regressions/round-7.test.ts](../../verify/tests/regressions/round-7.test.ts): the judge's reply is checked. A
+  verdict of `"Pass"` counts as a pass (it counted as a fail), one of `"mostly"` is an error naming the case, and keys
+  the reply adds can't overwrite the case: a `"human"` the answer under test talked the judge into replaced the human
+  label, and the judge's agreement with humans was measured against itself.
 
 How to write these tests so they prove something:
 - Feed the gate a realistic broken retriever (a removed normalization, a smaller candidate pool, another model) and

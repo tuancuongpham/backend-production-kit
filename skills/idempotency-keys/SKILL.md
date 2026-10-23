@@ -123,6 +123,9 @@ Against real Postgres. [verify/tests/skills/idempotency-keys.test.ts](../../veri
   - a request whose stale claim was taken over fails later → the new owner's claim stays, and a third retry gets
     409 instead of charging again ([regressions/round-3.test.ts](../../verify/tests/regressions/round-3.test.ts)).
 - Keys are parsed strictly and fingerprints are canonical.
+- [regressions/round-7.test.ts](../../verify/tests/regressions/round-7.test.ts): a handler whose query hit the
+  client-side timeout leaves no order for another request to commit, and the client's retry makes one order, not two;
+  `prune(0)` is a `RangeError`, not a loop that never ends.
 
 How to write these tests so they prove something:
 - Count the **business effect** (orders, charges at the fake provider), not rows in the keys table.

@@ -52,6 +52,7 @@ LLM *token or cost* budgets are a separate concern; see the `llm-gateway` skill.
 - Breaker: after the threshold, Redis isn't called any more. After the cooldown, 20 concurrent checks send 1 probe to a dead Redis, not 20, and all 20 answer within the probe's timeout ([regressions/round-3.test.ts](../../verify/tests/regressions/round-3.test.ts)).
 - Through Toxiproxy, Redis 300 ms slow against `timeoutMs: 50` → the check falls back to `local` in under 150 ms, and is back on `redis` once the latency is gone ([resilience-testing.test.ts](../../verify/tests/skills/resilience-testing.test.ts)).
 - Config: `refillPerSec: 0`, `capacity: 0` and `NaN` are rejected at startup. With refill 0 the Lua script itself errors on every call ([regressions/round-2.test.ts](../../verify/tests/regressions/round-2.test.ts)). So are a NaN `timeoutMs` and `instances` ([regressions/round-6.test.ts](../../verify/tests/regressions/round-6.test.ts)), and a `timeoutMs` Node can't schedule, past about 24.8 days: it fired after 1 ms, the same as NaN.
+- A wall clock stepped back an hour (NTP correcting a drifted host) doesn't empty the `local` fallback bucket for that hour: elapsed time is never negative, as in the Redis script. Before, the next check was refused with `Retry-After` near an hour ([regressions/round-7.test.ts](../../verify/tests/regressions/round-7.test.ts)).
 
 Before launch, load-test the real endpoint (k6/autocannon) to confirm limiter latency at p99 and that 429s don't cascade into client retry storms.
 

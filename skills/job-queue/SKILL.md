@@ -113,6 +113,9 @@ Against real Postgres. [verify/tests/skills/job-queue.test.ts](../../verify/test
 - [regressions/round-6.test.ts](../../verify/tests/regressions/round-6.test.ts): one schedule returning an Invalid
   Date and another whose `next()` throws are reported while the third still fires; NaN worker settings and a
   priority outside smallint are `RangeError`s.
+- [regressions/round-7.test.ts](../../verify/tests/regressions/round-7.test.ts): a `timeoutMs` Node can't schedule
+  (past about 24.8 days, which timed every job out at once) and `pruneJobs` with `batchSize: 0` (a loop that never
+  ended) are refused; an idle pause past that limit, which polled every millisecond, is refused by the worker loop.
 
 How to write these tests so they prove something:
 - Simulate a dead worker by claiming without ever heartbeating, and a frozen one by expiring a live worker's lease.

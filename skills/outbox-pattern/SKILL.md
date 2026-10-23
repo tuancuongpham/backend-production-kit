@@ -46,6 +46,7 @@ This is also how to keep slow AI work off the request path. The request writes `
 - `run()` drains a backlog of 25 in batches of 10, then picks up a message written later, until stopped; each is published once.
 - A publish that never returns → `relayOnce` gives up after `publishTimeoutMs`, records the error on that message, and releases the lock, so the next run can proceed ([regressions/round-2.test.ts](../../verify/tests/regressions/round-2.test.ts)).
 - Postgres goes away (through Toxiproxy) right after the first of 3 publishes → once the relay's connection has noticed, `relayOnce` rejects without publishing the other two; after recovery all 3 go out, and only the first was sent twice ([resilience-testing.test.ts](../../verify/tests/skills/resilience-testing.test.ts)). Before the fix, all 3 were sent twice.
+- A `publishTimeoutMs` Node can't schedule (past about 24.8 days) is refused: it fired after 1 ms, every publish failed, and the outbox stopped ([regressions/round-7.test.ts](../../verify/tests/regressions/round-7.test.ts)). The relay's transaction, and `consumeOnce`'s, can't be committed by the next request on their connection after a client-side query timeout: that connection is destroyed (the kernel tests of the same file).
 
 In a staging environment, also kill the relay process mid-batch (`kill -9`) and confirm the lag recovers with no gaps at the consumer.
 

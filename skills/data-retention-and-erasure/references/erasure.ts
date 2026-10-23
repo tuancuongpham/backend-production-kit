@@ -72,6 +72,8 @@ const PERSONAL = new RegExp(
   'i',
 );
 const IDENT = /^[A-Za-z_][A-Za-z0-9_]*(\.[A-Za-z_][A-Za-z0-9_]*)?$/;
+/** The longest timer Node can schedule: it runs a longer one after 1 ms. */
+const MAX_TIMER_MS = 2 ** 31 - 1;
 
 /**
  * What is wrong with an inventory, or [] if nothing is. Checked at startup: an unsafe inventory would otherwise
@@ -127,6 +129,8 @@ export class DataLifecycle {
     this.#dueDays = positive('dueDays', o.dueDays ?? 30, true);
     this.#leaseSec = positive('leaseSec', o.leaseSec ?? 300, false);
     this.#storeTimeoutMs = positive('storeTimeoutMs', o.storeTimeoutMs ?? 30_000, true);
+    // A timer Node can't schedule (past about 24.8 days) runs after 1 ms: every store would time out at once.
+    if (this.#storeTimeoutMs > MAX_TIMER_MS) throw new RangeError(`data lifecycle: storeTimeoutMs must be at most ${MAX_TIMER_MS}, got ${this.#storeTimeoutMs}`);
     if (this.#stores.length * this.#storeTimeoutMs >= this.#leaseSec * 1000) {
       throw new RangeError(`data lifecycle: ${this.#stores.length} stores × storeTimeoutMs ${this.#storeTimeoutMs} don't fit in leaseSec ${this.#leaseSec}`);
     }
@@ -195,20 +199,30 @@ export class DataLifecycle {
     return out;
   }
 
-  /** Delete rows past their retention window, per table, in batches (short locks, bounded WAL). */
+  /**
+   * Delete rows past their retention window, per table, in batches (short locks, bounded WAL). Rows are found by
+   * ctid, which is unique only within one physical table: on a table partitioned by time, the expired rows' ctids
+   * are also those of fresh rows in the current partition, and deleting by ctid alone deleted those too. The DELETE
+   * repeats the retention condition, so only an expired row can go. The loop ends on a batch that selected fewer
+   * rows than batchSize, not one that deleted fewer: a row the app deleted meanwhile isn't the end of the table.
+   */
   async runRetention(batchSize = 5000): Promise<Record<string, number>> {
+    // A batch of 0 deletes nothing, and "fewer than batchSize" never holds: the loop would never end.
+    if (!Number.isInteger(batchSize) || batchSize < 1) throw new RangeError(`data lifecycle: batchSize must be a positive integer, got ${batchSize}`);
     const deleted: Record<string, number> = {};
     for (const e of this.#inventory) {
       if (!e.retentionDays || !e.timeColumn) continue;
       deleted[e.table] = 0;
+      const expired = `${e.timeColumn} < now() - make_interval(days => $1)`;
       for (;;) {
-        const res = await this.#pool.query(
-          `DELETE FROM ${e.table} WHERE ctid = ANY(ARRAY(
-             SELECT ctid FROM ${e.table} WHERE ${e.timeColumn} < now() - make_interval(days => $1) LIMIT $2))`,
+        const { rows } = await this.#pool.query<{ selected: number; deleted: number }>(
+          `WITH batch AS (SELECT ctid FROM ${e.table} WHERE ${expired} LIMIT $2),
+                gone AS (DELETE FROM ${e.table} WHERE ctid = ANY(ARRAY(SELECT ctid FROM batch)) AND ${expired} RETURNING 1)
+           SELECT (SELECT count(*) FROM batch)::int AS selected, (SELECT count(*) FROM gone)::int AS deleted`,
           [e.retentionDays, batchSize],
         );
-        deleted[e.table] += res.rowCount ?? 0;
-        if ((res.rowCount ?? 0) < batchSize) break;
+        deleted[e.table] += rows[0].deleted;
+        if (rows[0].selected < batchSize) break;
       }
     }
     return deleted;

@@ -64,6 +64,11 @@ auditInventory()       → personal-looking columns that no one has classified �
 5. **Access requests.** `exportSubject(userId)` → a JSON bundle per table, delivered to the verified requester.
 6. **Retention.** Schedule `runRetention()` daily. It deletes in batches by `ctid`, so long deletes don't hold
    locks or flood replicas.
+   - Tables partitioned by time are safe: a `ctid` is unique only within one partition, so the DELETE repeats the
+     retention condition. Deleting by `ctid` alone, a run over an events table partitioned by month deleted the
+     current partition's rows that happened to share the expired rows' `ctid`s, data still inside its window.
+   - A batch ends the loop when it *selected* fewer rows than `batchSize`, not when it deleted fewer, since rows the
+     app deletes meanwhile don't mean the table is done. `batchSize` must be a positive integer.
 7. **CI guard.** Run `auditInventory()` against the migrated test database. A new column named `email`, `phone`,
    `full_name`, `address`, `ip_address`, `cccd`, `so_dien_thoai`… must be added to the inventory or marked
    `reviewed`. Free-text columns can't be judged by name: decide them when the table is designed.

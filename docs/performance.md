@@ -141,6 +141,42 @@ For comparison, one loop with batch 50 drains 200 uniform events in 1,542 ms at 
 **Shipped:** `worker.run({ loops, signal })`. It runs independent loops, and stopping waits for the claimed rows, so
 a deploy no longer strands rows in `processing` for `stuckAfterSec`.
 
+### A webhook event's transaction · `webhook-ingestion`
+
+Each claimed event runs in a transaction that locks its own row as the lease holder, runs the handler and marks the
+row done. With a handler that writes one row (a credit), A and B alternate event by event, five rounds of 2,000
+events each after a warm-up, median round ([`webhook-process.ts`](../bench/compare/webhook-process.ts)):
+
+| Variant | p50 | p95 | mean |
+|---|---|---|---|
+| A. `BEGIN` / lock / handler / mark done / `COMMIT`: 5 round trips (0.6.0) | 1.985 ms | 3.23 ms | 2.076 ms |
+| B. `BEGIN; lock` in one call / handler / `mark done; COMMIT` in one call: 3 round trips | **1.699 ms** | **2.938 ms** | **1.800 ms** |
+| C. shipped worker, per event, claims of 10 included | — | — | 2.003 ms |
+
+A run on a less busy machine gave the same gap (1.777 → 1.488 ms p50, 16%). Alternating the variants matters here:
+run back to back, one variant took the machine's slow minute and the other its fast one, and two runs disagreed.
+
+**Shipped:** shape B, 14% less time per event at the median. A statement with parameters can't share a call, so the
+row's id and lease are written into the SQL, after a check that lets nothing but a bigint and a uuid through. Both
+come from the worker's own claim.
+
+### A statement the client gave up on · every skill that holds a connection
+
+A pool with a client-side `query_timeout` of 300 ms and one connection. Request A inserts a row, then runs a
+statement that takes 1 s; B arrives just after A fails; C inserts a row once A's statement has finished on the
+server. Times are from A's start, three runs each ([`round-7.test.ts`](../verify/tests/regressions/round-7.test.ts)
+holds the same scenario as tests):
+
+| | 0.6.0 | now |
+|---|---|---|
+| A fails | at 638 ms: its `ROLLBACK` queued behind the running statement and timed out too | at 320–327 ms, the timeout |
+| B, a 1 ms query sent right after | **fails** at 948 ms with `Query read timeout`: it got A's busy connection | answers at 332–339 ms, on a new connection |
+| rows after C commits | `[1, 2]`: **C's COMMIT committed A's insert** | `[2]` |
+
+**Shipped:** a client whose query timed out is destroyed instead of released, and so is one whose `ROLLBACK`
+failed; the server rolls the transaction back when the connection closes. Under a burst of timeouts the pool opens
+new connections more often: that is the price of not handing a busy one to the next request.
+
 ### Claiming a job · `job-queue`
 
 Three table designs for a job queue ([`job-queue.ts`](../bench/compare/job-queue.ts)). Each table holds 1,000,000

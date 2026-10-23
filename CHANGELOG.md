@@ -1,5 +1,112 @@
 # Changelog
 
+## Unreleased
+
+### Fixed — latent bugs, round 7: state taken on trust, waits without an end
+Round 7 looked for state the code assumed instead of checking: a connection still running a statement the client had
+given up on, a `ctid` on a table partitioned by time, a batch that lost a row to the app, a judge's reply. It also
+looked for waits without an end and for the failure path of redaction. Its 20 hypotheses
+(`verify/tests/regressions/round-7.test.ts`) all failed before their fixes and pass now.
+- The shared transaction helper (`pg-transaction.ts`, in nine skills): a query past the pool's client-side
+  `query_timeout` is still running on the server, inside its transaction, and the connection went back to the pool.
+  The next request on it timed out behind the statement, and the one after committed the failed request's writes:
+  - with a 300 ms timeout and a 1 s statement, request A failed at 638 ms (its ROLLBACK queued behind the statement
+    and timed out too), B, a 1 ms query sent right after, failed at 948 ms, and C's COMMIT committed A's insert;
+  - in `idempotency-keys`, the order of a request told it had failed was committed later by another request, and
+    the client's retry placed a second one;
+  - in `webhook-ingestion`, a handler's writes were committed without the event marked done, and applied again
+    on its retry;
+  - a `BEGIN` sent with `opts.begin` that timed out was never rolled back at all.
+
+  Such a connection is now destroyed instead of released, and so is one whose ROLLBACK failed: the server rolls the
+  transaction back. A fails at the timeout (320 ms), B is answered (at 335 ms), and only C's row exists.
+- `data-retention-and-erasure`: retention on a table partitioned by time deleted rows still inside their window.
+  It deleted by `ctid`, which is unique only within one partition, and the fresh rows sharing the expired rows'
+  `ctid`s went too: 10 rows of 10, where 5 had expired. The DELETE repeats the retention condition now, and a run
+  ends on the rows a batch selected, not the ones it deleted.
+- `zero-downtime-migrations`: a backfill on a table the app deletes from stopped early and reported success. One row
+  deleted while the first batch waited for its lock made that batch update 9 rows of 10, which the loop took for the
+  last batch: 15 of 25 rows were never done. It now ends on the ids a batch selected.
+- `llm-gateway`: in the default shadow mode, an embedding API that never answered held every answer, since the
+  lookup is awaited to save the embedding; a cache store that never answered held every request. Each call to the
+  cache store or `embed` now has a deadline, `cacheTimeoutMs` (default 1 s), and fails open after it.
+- `service-hardening`: an `onShutdown` hook that never settled (`pool.end()` waiting for a client nobody released)
+  kept the process alive until it was killed, and the hooks after it never ran. Each hook now gets
+  `shutdownHookTimeoutMs` (default 5 s); a hook that throws, even synchronously, doesn't stop the others.
+- Personal data on the failure path:
+  - `llm-observability`: the exception of a failed call or retrieval was recorded on the span as it was, a
+    database error naming the customer's email beside the redacted prompt. It goes through `redact` now, message
+    and stack, as does the status message.
+  - `pii-redaction`: pino formats a message's arguments after the redaction hook, and `formatters.log` never sees
+    the result: `logger.info('order %j', order)` logged the order's email. Every argument is redacted now, and an
+    `Error` passed to `%s` becomes its redacted text. An `AggregateError`, which a job scheduler's tick throws when
+    schedules fail, was logged without the errors it holds; they are kept, redacted.
+- A duration past 2,147,483,647 ms (about 24.8 days) is a timer Node runs after 1 ms. Each component now refuses it
+  at startup, like NaN:
+  - `sse-streaming`: a heartbeat of 30 days (someone's "never") pinged every millisecond;
+  - worker loops (`job-queue`, `webhook-ingestion`, `outbox-pattern`): such an idle pause polled every millisecond;
+  - `job-queue`: a `timeoutMs` of 30 days timed every job out at once;
+  - `service-hardening`: no drain delay at all, a grace period that cut every request, idle keep-alive sockets
+    closed at once;
+  - the timeouts of `cache-stampede`, `rate-limiting`, `outbox-pattern`, `data-retention-and-erasure`,
+    `agent-safe-db` and `llm-gateway` failed every call, and a backfill's pause was no pause.
+
+  Timers derived from a setting (the job heartbeat at a third of the lease, the external-call signal at half of
+  `staleAfterSec`) are capped there instead.
+- A prune with `batchSize: 0` deleted nothing in a loop that never ended: `pruneInbox`, `pruneJobs`,
+  `IdempotencyKeys#prune`, `pruneLlmCache` and `runRetention` refuse it. `pruneInbox` also refuses a window under a
+  day, which drops the dedup keys of events a provider is still retrying.
+- A wall clock stepped back (NTP correcting a drifted host, a VM resumed):
+  - `rate-limiting`: the local fallback bucket went negative and refused requests for as long as the step (the Redis
+    script already clamped it);
+  - the circuit breaker (`llm-gateway`, `rate-limiting`, `cache-stampede`) stayed open for the length of the step.
+- `rag-evals`: the judge's reply was taken whole. A verdict of `"Pass"` counted as a fail, any other word silently
+  too, and extra keys overwrote the case: a `"human"` the answer under test talked the judge into replaced the human
+  label, so the judge's agreement with humans was measured against itself.
+- `agent-safe-db`: a tool whose SQL ended with a `-- comment` failed every call, since the comment swallowed the
+  closing parenthesis of the row-cap wrapper.
+
+### Changed
+- `pg-transaction.ts`: `withClient`'s callback gets a third argument, `discard(reason)`, and the new
+  `rollback(client, err, discard)` ends a failed transaction for code that runs its own BEGIN and COMMIT. A client
+  whose query timed out, or whose ROLLBACK failed, is destroyed; `BEGIN` and `COMMIT` are inside the rollback's
+  reach.
+- `llm-gateway`: `cacheTimeoutMs` (default 1000 ms); the skill now vendors `with-timeout.ts`.
+- `service-hardening`: `shutdownHookTimeoutMs` (default 5000 ms).
+- `webhook-ingestion`: an event's transaction takes 3 round trips plus the handler's own, not 5. The row's id and
+  lease are written into that SQL after a check that lets only a bigint and a uuid through.
+- `zero-downtime-migrations`: `backfill` ends on the ids a batch selected; `lastId` is the largest of them.
+- `data-retention-and-erasure`: `runRetention` repeats the retention condition in its DELETE.
+- `rag-evals`: `runJudge` takes only `verdict` and `reason` from the judge, reads a verdict in any case and spacing,
+  and throws a `TypeError` naming the case for any other.
+- `agent-safe-db`: a tool's SQL ending with a semicolon is refused at startup.
+- `pii-redaction`: the pino hook redacts every argument; `redactValue` of an error keeps its `errors`.
+- To upgrade from 0.6.0:
+  - no SQL changes. Copy the new `pg-transaction.ts`, `circuit-breaker.ts` and `worker-loop.ts` with the skills
+    that import them, and `with-timeout.ts` with `llm-gateway`.
+  - Under a burst of client-side query timeouts, the pool opens new connections more often: each timed-out one is
+    destroyed.
+  - A duration past 2,147,483,647 ms, a prune `batchSize` under 1 and a `pruneInbox` window under a day throw a
+    `RangeError`; a judge's verdict other than pass or fail throws a `TypeError`; a tool's SQL ending with `;` is
+    refused.
+  - The gateway gives up on a cache-store or embedding call after 1 s: raise `cacheTimeoutMs` if yours is slower.
+  - The pino hook passes redacted copies of non-string arguments, and an `Error` interpolated with `%s` as its text.
+
+### Performance
+- `webhook-ingestion`: 14% less time per event with a handler that writes one row (p50 1.99 → 1.70 ms; 5 round
+  trips → 3, [details](docs/performance.md#a-webhook-events-transaction--webhook-ingestion)).
+- The shared transaction helper: a transaction whose query timed out fails at the timeout, not twice it (638 →
+  320 ms with a 300 ms `query_timeout`), and the next request is answered at once instead of timing out behind it
+  ([details](docs/performance.md#a-statement-the-client-gave-up-on--every-skill-that-holds-a-connection)).
+- `llm-gateway`: with an embedding API that hangs, an answer goes out after `cacheTimeoutMs` instead of never.
+
+### Tests
+- `verify/tests/regressions/round-7.test.ts`: the 20 hypotheses of round 7.
+- `webhook-ingestion`: a claimed event whose lease passed to another worker before its turn isn't run, a branch no
+  test reached. `llm-observability`: a failure that isn't an `Error`, and a redactor that throws.
+- New benchmark: `bench/compare/webhook-process.ts`.
+- 458 tests in all, up from 436. Coverage: 99.5% of lines, 93.1% of branches, 97.2% of functions.
+
 ## 0.6.0 — 2026-10-23
 
 ### Fixed — latent bugs, round 4: real input

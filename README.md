@@ -96,6 +96,14 @@ found in it (several are classic production incidents), now fixed and guarded by
 | An async `onDead` alert while Slack is down | its rejection is unhandled: **the worker process exits** | a hook can't change the outcome: the dead letter stands, the worker runs on (in all nine skills that take hooks) |
 | A webhook signature with a character appended (`…0`) | **still verified**: `Buffer.from(sig, 'hex')` stops at the first character that isn't hex | only whole hex compares |
 | A long backfill run as a job that lost its lease | **keeps writing beside the run that replaced it** | stops after the current batch on the job's signal, resumable from `lastId` |
+| A query passes the pool's client-side `query_timeout` in the middle of a transaction | the connection went back to the pool still running it: **the next request's COMMIT committed the failed one's writes** (an order the client retried was placed twice), and the request after it timed out behind the statement | the connection is destroyed and the server rolls back: the failure comes at the timeout (320 ms, not 638), and the next request is answered (at 335 ms, instead of failing at 948) |
+| Retention on a table partitioned by month | rows were deleted by `ctid`, unique only within a partition: **fresh rows sharing the expired rows' `ctid`s were deleted too** (10 of 10, where 5 had expired) | the DELETE repeats the retention condition: 5 deleted, 5 kept |
+| A backfill while the app deletes rows | one row deleted while the first batch waited made that batch look like the last: **"finished" with 15 of 25 rows not done** | ends on the ids it selected: all 24 remaining rows done |
+| An embedding API that hangs, with the semantic cache in its default shadow mode | **every answer held forever**, though the cache is optional | the lookup gives up after `cacheTimeoutMs` (1 s), and the answer goes out |
+| A shutdown hook that never settles (`pool.end()` waiting for a client nobody released) | the process **never exited on its own**, and the hooks after it, the telemetry flush, never ran | each hook gets `shutdownHookTimeoutMs` (5 s), then the next one runs |
+| A failed LLM call whose error names the customer's email | **the exception reached the trace backend in clear**, beside the redacted prompt | redacted like the prompt |
+| `logger.info('order %j', order)` with pino | **the order's email logged in clear**: pino formats the arguments after the redaction hook | every argument redacted |
+| A heartbeat or an idle pause of "30 days" (someone's "never") | Node runs a timer past 24.8 days after 1 ms: **a ping every millisecond**, a worker **polling the database every millisecond** | refused at startup, in every component with a timer |
 
 Round 3 listed 34 hypotheses about what could break and wrote each as a test. All 34 failed on the release before
 it, and all are fixed ([`regressions/round-3.test.ts`](verify/tests/regressions/round-3.test.ts)).
@@ -125,8 +133,18 @@ Its 29 hypotheses all failed before their fixes ([`round-6.test.ts`](verify/test
   held a user's account deletion open;
 - during a deploy's drain delay, requests the load balancer still sent got a 503.
 
-The suite now has 436 tests, organized by what they prove ([verify/README.md](verify/README.md)). They cover 99.5%
-of the reference code's lines and 93.0% of its branches, and CI fails below 98% and 90%.
+Round 7 looked for state the code assumed instead of checking, and for waits without an end. Its 20 hypotheses all
+failed before their fixes ([`round-7.test.ts`](verify/tests/regressions/round-7.test.ts)):
+- a query past the pool's client-side timeout left its transaction open on a pooled connection, and the next request
+  committed it. That was in the transaction helper nine skills share;
+- retention on a table partitioned by time deleted rows still inside their window, and a backfill stopped after a
+  batch lost one row to the app;
+- a hung embedding API held every answer of the LLM gateway, and a hung shutdown hook kept the process alive;
+- the exception on an LLM span and pino's interpolated arguments reached their backends unredacted;
+- a duration past 24.8 days fired after 1 ms, and a prune with `batchSize: 0` never ended.
+
+The suite now has 458 tests, organized by what they prove ([verify/README.md](verify/README.md)). They cover 99.5%
+of the reference code's lines and 93.1% of its branches, and CI fails below 98% and 90%.
 
 ## Incidents it is tested against
 
@@ -141,6 +159,7 @@ The newer skills ship tests that recreate the incident, not just the happy path:
 | Errors jump to 10% | **paged in 9 minutes**; a 0.2% leak opens a ticket after 36 hours and never pages; normal noise triggers nothing; Prometheus's own `promtool` checks the rules in CI ([`slo-alerting`](skills/slo-alerting/SKILL.md)) |
 | Database replies slow to 1 s | a server-side `statement_timeout` **never fires**; a client-side `query_timeout` fails the call in under 600 ms ([`resilience-testing`](skills/resilience-testing/SKILL.md)) |
 | A failover black-holes new connections | a pool without `connectionTimeoutMillis` was **still waiting after 2 s** (it waits forever); with 500 ms, it fails in under 1 s |
+| A query times out on the client in the middle of a transaction | the connection is destroyed, not reused: the next request neither waits behind the statement nor commits the failed request's writes, and the client's retry places one order, not two ([`idempotency-keys`](skills/idempotency-keys/SKILL.md)) |
 | Redis slows down or dies | the rate limiter decides locally within 150 ms and returns to Redis once it recovers; the cache serves from the database and reports the outage |
 | A deploy forgot an environment variable | the component **refuses to start**, naming the setting. Before, `Number(undefined)` was NaN and the limit silently vanished: a NaN grace period cut every request when the deploy began, a NaN limiter timeout let everything through |
 | A price changes while a request is reading it | the slow read can't write the old price back after `invalidate()`: the cache's writes are compare-and-set ([`cache-stampede`](skills/cache-stampede/SKILL.md)) |
@@ -167,6 +186,7 @@ reference code ships the winner ([every table, plan and trade-off](docs/performa
 | A black-holed Redis behind the cache | a 50 ms timeout per request vs a circuit breaker | breaker | 20 requests: 181 ms instead of 1,236 ms |
 | Tenant transaction (RLS) | 4 round trips vs 3 | 3 | 19% faster per request; RLS itself costs ~0 |
 | Agent database tool call | 4 round trips vs 3 | 3 | 15% faster per call (p50 0.60 → 0.51 ms) |
+| A webhook event's transaction | 5 round trips vs 3 | 3 | 14% less time per event (p50 1.99 → 1.70 ms) |
 | Retrieval eval in CI | one query at a time vs 4 or 8 at once | 4 (default) | 198 queries: 16.6 s → 4.2 s, same metrics |
 | Outbox retention | one `DELETE` vs batches vs batches through an index | one `DELETE` (kept) | batches were 11× slower, with no shorter statement |
 | Rate limiter client | ioredis defaults vs auto-pipelining | defaults (kept) | auto-pipelining was 11% slower |
@@ -236,7 +256,7 @@ reference code, the properties that must be proven by tests, and the mistakes it
   the core.
 - **A small shared kernel** (transactions that survive a dead connection, a half-open circuit breaker, deadlines,
   worker loops, text made storable, hooks that can't break the work), vendored into each skill and kept identical by CI.
-- **Fourteen invariants** every skill keeps, each one a bug this kit once had: [docs/architecture.md](docs/architecture.md).
+- **Sixteen invariants** every skill keeps, each one a bug this kit once had: [docs/architecture.md](docs/architecture.md).
 
 ## Run the checks yourself
 

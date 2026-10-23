@@ -83,7 +83,16 @@ Toxiproxy service containers.
 - **Changed a file in `shared/`?** Run `npm run sync:shared`, and add or update its test in `verify/tests/kernel/`.
 - **Added a numeric option?** Check it in the constructor and throw a `RangeError` for NaN and for values out of
   range. Apps read options with `Number(process.env.X)`, which is NaN when the variable is unset, and NaN compares
-  false with everything: an unchecked limit turns itself off without an error.
+  false with everything: an unchecked limit turns itself off without an error. A duration that becomes a timer stops
+  at 2,147,483,647 ms: Node runs a longer one after 1 ms. A batch size is at least 1, or "fewer than the batch size"
+  never happens and the loop never ends.
+- **Running your own BEGIN and COMMIT?** Take the third argument of `withClient`'s callback, `discard`, and end a
+  failed transaction with `rollback(client, err, discard)`: a connection whose query timed out, or whose ROLLBACK
+  failed, must be destroyed, never handed to the next caller.
+- **Writing a loop over batches?** Name rows by something unique in the whole table (not a bare `ctid` on a table
+  that may be partitioned), repeat the condition that chose them in the statement that changes them, and end the
+  loop on what a batch selected, not on what it changed.
+- **Recording a failure in a log or a trace?** Send its message and stack through the same redactor as the content.
 
 ## Releasing
 

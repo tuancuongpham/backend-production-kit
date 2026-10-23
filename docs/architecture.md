@@ -2,7 +2,7 @@
 
 The reference code in `skills/*/references/` is what an agent copies into someone else's codebase. It has to be
 correct under failure, easy to adapt, and small enough to read in one sitting. These conventions keep the twenty
-skills consistent; the invariants at the end are the bug classes five review rounds found, each turned into a
+skills consistent; the invariants at the end are the bug classes six review rounds found, each turned into a
 rule with a test.
 
 ## Two kinds of code, and one exception
@@ -62,10 +62,10 @@ imports them:
 
 | File | Gives you | Used by |
 |---|---|---|
-| [`pg-transaction.ts`](../shared/pg-transaction.ts) | `withClient`, `withTransaction`: a connection that dies mid-call fails that call, not the process | 9 skills |
+| [`pg-transaction.ts`](../shared/pg-transaction.ts) | `withClient`, `withTransaction`, `rollback`: a connection that dies mid-call fails that call, not the process; one whose state is unknown (a query past the client-side timeout, a failed rollback) is destroyed, not handed to the next caller | 9 skills |
 | [`pg-values.ts`](../shared/pg-values.ts) | `pgText`, `pgJson`: text from users, providers and models made storable (a NUL or half an emoji becomes U+FFFD, a BigInt a string) | 8 skills |
 | [`hooks.ts`](../shared/hooks.ts) | `callHook`: an app's hook (onError, onDead, onOverflow…) that throws or rejects changes nothing | 9 skills |
-| [`with-timeout.ts`](../shared/with-timeout.ts) | a deadline for any promise, whose late rejection can't crash Node | outbox, limiter, cache, server |
+| [`with-timeout.ts`](../shared/with-timeout.ts) | a deadline for any promise, whose late rejection can't crash Node | outbox, limiter, cache, server, erasure, gateway |
 | [`circuit-breaker.ts`](../shared/circuit-breaker.ts) | a breaker with a real half-open state: one probe, not the whole backlog | gateway, limiter, cache |
 | [`worker-loop.ts`](../shared/worker-loop.ts) | `runLoops`: independent poll loops, idle pause, graceful stop | webhooks, jobs, outbox |
 
@@ -81,13 +81,19 @@ Each of these was a bug in this kit, found by a failing test first. The fix is t
    erasure requests (a lease) all follow it. Without it, a worker that was too slow overwrote the outcome of the one
    that took over, a slow webhook handler credited a payment twice, and a timed-out request freed a key that a
    retry was still using.
-2. **A connection that dies mid-work fails the call, not the process.** Every checked-out client goes through
-   `withClient`. A pool the code creates itself gets an `error` listener, a connect timeout and a client-side
-   query timeout.
+2. **A connection that dies mid-work fails the call, not the process, and one whose state is unknown is destroyed,
+   not reused.** Every checked-out client goes through `withClient`. A pool the code creates itself gets an `error`
+   listener, a connect timeout and a client-side query timeout. A query past that timeout is still running on the
+   server, inside its transaction: released to the pool, the connection made the next caller time out behind it,
+   and the next caller's COMMIT committed the writes of a request that had been told it failed (an order placed
+   twice once the client retried). Such a client, and one whose ROLLBACK failed, is destroyed; the server then
+   rolls the transaction back.
 3. **Every wait has a deadline.** That means `withTimeout`, `AbortSignal.timeout`, `query_timeout` and
    `connectionTimeoutMillis`. A server-side `statement_timeout` limits the work, not a slow or black-holed network.
    It holds for the app's own callbacks too: an erasure's external store that never answered held the user's
-   "delete my account" request open, and every request claimed beside it.
+   "delete my account" request open, and every request claimed beside it. And for optional infrastructure: an
+   embedding API that never answered held every answer of the gateway, and a shutdown hook that never settled kept
+   the process from exiting, with the hooks after it never run.
 4. **A breaker lets one probe through after its cooldown.** Letting the whole backlog through makes each request
    wait out the full timeout of a dependency that is still down.
 5. **Optional infrastructure fails open and never turns a success into a failure.** This covers caches,
@@ -104,7 +110,11 @@ Each of these was a bug in this kit, found by a failing test first. The fix is t
    and NaN compares false with everything, so a limit stops limiting without an error. A NaN `maxInFlight` shed
    nothing, a NaN grace period cut every request at the start of a deploy, a NaN worker `loops` ran no loop, a NaN
    replay window accepted year-old webhooks, a NaN heartbeat pinged every millisecond. Each component refuses NaN,
-   out-of-range values and a percentage where a ratio belongs with a `RangeError` before it starts.
+   out-of-range values and a percentage where a ratio belongs with a `RangeError` before it starts. Out of range
+   includes a duration Node can't schedule: past 2,147,483,647 ms (about 24.8 days) a timer runs after 1 ms, so a
+   heartbeat of "30 days" pinged every millisecond and a job timeout of 30 days timed every job out at once. A timer
+   derived from a setting (a heartbeat at a third of the lease) is capped there instead. And a batch size of 0: a
+   prune that deletes 0 rows per batch never sees a batch smaller than its size, and never ends.
 8. **State that outlives a request lives outside process memory.** That includes the taint of an agent session
    (its next turn may hit another instance) and event ids that must survive a restart.
 9. **Untrusted text is inserted with a replacer function, never a replacement string.** In
@@ -130,6 +140,15 @@ Each of these was a bug in this kit, found by a failing test first. The fix is t
     before a change and finished after the change's invalidation wrote the old row back for a whole TTL. The
     cache's writes are compare-and-set against what the writer saw, and invalidation leaves a tombstone. Claims
     with tokens (invariant 1) are the same rule for rows a worker owns.
+15. **A batch is chosen, and ended, by what it selected.** A row is named by something unique in the whole table,
+    and a loop over batches ends on a batch that selected fewer rows than its size, not one that changed fewer. On a
+    table partitioned by time, retention deleted by `ctid`, which is unique only within one partition: the fresh rows
+    sharing the expired rows' `ctid`s were deleted too. A backfill whose batch skipped a row the app had just
+    deleted took the batch for the last one, and reported success with most of the table left.
+16. **What leaves the process is redacted on the failure path too.** The prompt on an LLM span went through the
+    redactor, and the exception beside it, a database error naming the customer's email, didn't. pino formats a
+    message's arguments after the redaction hook (`logger.info('order %j', order)`), so they went out as they were.
+    Every exception, status message and log argument passes the same redactor as the content.
 
 ## Testing seams
 
@@ -141,7 +160,7 @@ Each of these was a bug in this kit, found by a failing test first. The fix is t
   Redis and Toxiproxy:
   - `skills/<skill>.test.ts` prove what each skill's SKILL.md claims; `kernel/` the shared building blocks.
   - `regressions/round-N.test.ts` hold each review round's hypotheses. Every one failed on the code before its fix:
-    34 in round 3, 25 in round 4, 21 in round 5, 29 in round 6.
+    34 in round 3, 25 in round 4, 21 in round 5, 29 in round 6, 20 in round 7.
   - `journeys/` drive several skills end to end over real HTTP, wired as an application wires them, through what
     users, providers and models do: retries, double taps, closed tabs, deploys, forged requests, edited URLs.
   - `properties/` check rules over generated input (fast-check): personal data in any format never survives

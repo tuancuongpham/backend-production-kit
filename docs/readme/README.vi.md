@@ -96,6 +96,14 @@ mẫu (nhiều cái là sự cố production kinh điển), nay đã sửa và c
 | Hook `onDead` bất đồng bộ báo Slack trong lúc Slack sập | rejection không ai bắt: **process worker thoát** | hook không thể đổi kết quả: dead letter vẫn được ghi, worker chạy tiếp (ở cả chín skill có hook) |
 | Chữ ký webhook bị nối thêm một ký tự (`…0`) | **vẫn được chấp nhận**: `Buffer.from(sig, 'hex')` dừng ở ký tự đầu tiên không phải hex | chỉ so sánh khi là hex trọn vẹn |
 | Backfill dài chạy trong một job đã mất lease | **tiếp tục ghi song song với lần chạy thay thế nó** | dừng sau batch hiện tại khi signal của job bị hủy, resume được từ `lastId` |
+| Một query vượt `query_timeout` phía client của pool giữa chừng một transaction | connection quay về pool trong khi vẫn đang chạy câu lệnh đó: **COMMIT của request kế tiếp commit luôn phần ghi của request đã báo lỗi** (đơn hàng mà client gửi lại bị tạo hai lần), và request sau nữa bị timeout vì phải chờ sau câu lệnh | connection bị hủy và server tự rollback: lỗi trả về đúng lúc timeout (320 ms thay vì 638 ms), request kế tiếp được trả lời (ở 335 ms, thay vì lỗi ở 948 ms) |
+| Dọn dữ liệu hết hạn trên bảng chia partition theo tháng | dòng bị xóa theo `ctid`, vốn chỉ duy nhất trong một partition: **cả những dòng còn hạn có cùng `ctid` với dòng hết hạn cũng bị xóa** (10/10, trong khi chỉ 5 dòng hết hạn) | lệnh DELETE lặp lại điều kiện hết hạn: xóa 5, giữ 5 |
+| Backfill trong lúc app đang xóa dòng | một dòng bị xóa khi batch đầu đang chờ khiến batch đó trông như batch cuối: **báo "xong" khi 15/25 dòng chưa được cập nhật** | dừng dựa trên các id đã chọn: cả 24 dòng còn lại đều được cập nhật |
+| API embedding bị treo, semantic cache ở chế độ shadow mặc định | **mọi câu trả lời bị giữ mãi**, dù cache chỉ là phần tùy chọn | lần tra cứu bỏ cuộc sau `cacheTimeoutMs` (1 giây), câu trả lời vẫn được trả về |
+| Một hook tắt máy không bao giờ kết thúc (`pool.end()` chờ một client không ai trả lại) | process **không tự thoát được**, và các hook phía sau, như đẩy telemetry, không bao giờ chạy | mỗi hook có `shutdownHookTimeoutMs` (5 giây), rồi hook tiếp theo chạy |
+| Lời gọi LLM thất bại với lỗi chứa email khách hàng | **exception tới trace backend nguyên văn**, ngay cạnh prompt đã được che | được che như prompt |
+| `logger.info('order %j', order)` với pino | **email trong đơn hàng lọt vào log nguyên văn**: pino định dạng các đối số sau hook che dữ liệu | mọi đối số đều được che |
+| Heartbeat hoặc khoảng nghỉ "30 ngày" (ý là "không bao giờ") | Node chạy timer quá 24,8 ngày sau 1 ms: **ping mỗi mili giây**, worker **hỏi database mỗi mili giây** | bị từ chối khi khởi động, ở mọi thành phần có timer |
 
 Vòng 3 đặt ra 34 giả thuyết về chỗ có thể hỏng và viết mỗi giả thuyết thành một test. Cả 34 đều fail trên bản phát
 hành trước đó, và đều đã được sửa ([`regressions/round-3.test.ts`](../../verify/tests/regressions/round-3.test.ts)).
@@ -126,8 +134,18 @@ giả thuyết đều fail trước khi được sửa ([`round-6.test.ts`](../.
   trả lời giữ treo yêu cầu xóa tài khoản của người dùng;
 - trong lúc drain khi deploy, request mà load balancer vẫn gửi tới bị trả 503.
 
-Bộ test giờ có 436 test, xếp theo thứ chúng chứng minh ([verify/README.md](../../verify/README.md)). Chúng phủ 99,5%
-số dòng và 93,0% số nhánh của code mẫu, và CI fail nếu tụt dưới 98% và 90%.
+Vòng 7 tìm những trạng thái mà code mặc định là đúng thay vì kiểm tra, và những chỗ chờ không có điểm dừng. Cả 20 giả
+thuyết đều fail trước khi được sửa ([`round-7.test.ts`](../../verify/tests/regressions/round-7.test.ts)):
+- một query vượt timeout phía client của pool để lại transaction đang mở trên connection trong pool, và request kế
+  tiếp commit nó. Lỗi nằm trong hàm transaction dùng chung của chín skill;
+- dọn dữ liệu hết hạn trên bảng chia partition theo thời gian xóa cả dòng còn hạn, và backfill dừng sau một batch bị
+  app xóa mất một dòng;
+- API embedding treo giữ mọi câu trả lời của LLM gateway, và một hook tắt máy bị treo giữ process sống mãi;
+- exception trên span LLM và các đối số nội suy của pino tới backend mà không được che;
+- một khoảng thời gian quá 24,8 ngày chạy sau 1 ms, và lệnh dọn với `batchSize: 0` không bao giờ dừng.
+
+Bộ test giờ có 458 test, xếp theo thứ chúng chứng minh ([verify/README.md](../../verify/README.md)). Chúng phủ 99,5%
+số dòng và 93,1% số nhánh của code mẫu, và CI fail nếu tụt dưới 98% và 90%.
 
 ## Đã được test với các sự cố thật
 
@@ -142,6 +160,7 @@ Các skill mới có test dựng lại đúng sự cố, không chỉ đường 
 | Tỉ lệ lỗi tăng lên 10% | **gọi người trực sau 9 phút**; rò rỉ 0,2% mở ticket sau 36 giờ và không bao giờ gọi người trực; nhiễu bình thường không kích hoạt gì; `promtool` của chính Prometheus kiểm tra các rule trong CI ([`slo-alerting`](../../skills/slo-alerting/SKILL.md)) |
 | Phản hồi từ database chậm 1 giây | `statement_timeout` phía server **không bao giờ kích hoạt**; `query_timeout` phía client cắt lời gọi trong chưa tới 600 ms ([`resilience-testing`](../../skills/resilience-testing/SKILL.md)) |
 | Failover làm kết nối mới rơi vào hố đen | pool không có `connectionTimeoutMillis` **vẫn đang chờ sau 2 giây** (nó chờ mãi mãi); đặt 500 ms thì lỗi trong chưa tới 1 giây |
+| Một query timeout phía client giữa chừng một transaction | connection bị hủy, không dùng lại: request kế tiếp không phải chờ sau câu lệnh đó, cũng không commit phần ghi của request đã lỗi, và lần gửi lại của client chỉ tạo một đơn hàng, không phải hai ([`idempotency-keys`](../../skills/idempotency-keys/SKILL.md)) |
 | Redis chậm hoặc chết | rate limiter tự quyết định cục bộ trong 150 ms và quay lại Redis khi Redis hồi phục; cache lấy dữ liệu từ database và báo sự cố |
 | Một lần deploy quên đặt biến môi trường | thành phần đó **từ chối khởi động** và nêu tên thiết lập. Trước đây `Number(undefined)` là NaN và giới hạn lặng lẽ biến mất: grace period NaN cắt mọi request ngay khi deploy bắt đầu, timeout NaN của limiter cho qua tất cả |
 | Giá thay đổi đúng lúc một request đang đọc nó | lần đọc chậm không thể ghi lại giá cũ sau `invalidate()`: cache chỉ ghi khi khóa còn đúng như lúc đọc ([`cache-stampede`](../../skills/cache-stampede/SKILL.md)) |
@@ -168,6 +187,7 @@ dùng phương án thắng ([toàn bộ bảng số, query plan và đánh đổ
 | Redis rơi vào hố đen phía sau cache | timeout 50 ms cho mỗi request, circuit breaker | breaker | 20 request: 181 ms thay vì 1.236 ms |
 | Transaction theo tenant (RLS) | 4 round trip, 3 round trip | 3 | mỗi request nhanh hơn 19%; bản thân RLS gần như không tốn gì |
 | Một lần gọi tool database của agent | 4 round trip, 3 round trip | 3 | mỗi lần gọi nhanh hơn 15% (p50 0,60 → 0,51 ms) |
+| Transaction của một event webhook | 5 round trip, 3 round trip | 3 | mỗi event tốn ít hơn 14% thời gian (p50 1,99 → 1,70 ms) |
 | Đánh giá truy xuất trong CI | từng truy vấn một, 4 hoặc 8 truy vấn cùng lúc | 4 (mặc định) | 198 truy vấn: 16,6 s → 4,2 s, metric giữ nguyên |
 | Dọn outbox theo thời hạn lưu | một lệnh `DELETE`, chia lô, chia lô qua index | một lệnh `DELETE` (giữ nguyên) | chia lô chậm hơn 11 lần, câu lệnh dài nhất cũng không ngắn hơn |
 | Client của rate limiter | mặc định của ioredis, auto-pipelining | mặc định (giữ nguyên) | auto-pipelining chậm hơn 11% |
@@ -228,7 +248,7 @@ theo khách"); skill phù hợp sẽ tự được nạp.
 - **Một bộ khung dùng chung nhỏ** (transaction chịu được kết nối chết, circuit breaker half-open, deadline, vòng lặp
   worker, văn bản lưu được vào Postgres, hook không thể làm hỏng công việc), được chép vào từng skill và CI giữ cho các
   bản chép giống hệt nhau.
-- **Mười bốn bất biến** mọi skill đều giữ, mỗi cái là một bug bộ kit từng mắc: [docs/architecture.md](../architecture.md).
+- **Mười sáu bất biến** mọi skill đều giữ, mỗi cái là một bug bộ kit từng mắc: [docs/architecture.md](../architecture.md).
 
 ## Tự kiểm chứng
 

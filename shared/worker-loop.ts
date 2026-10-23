@@ -16,13 +16,19 @@ export interface LoopOptions {
   onError?: (err: unknown) => unknown;
 }
 
+/** The longest timer Node can schedule: it runs a longer one after 1 ms. */
+const MAX_TIMER_MS = 2 ** 31 - 1;
+
 export async function runLoops(o: LoopOptions): Promise<void> {
   const loops = o.loops ?? 1;
   const idleMs = o.idleMs ?? 1000;
   // A number read from an unset environment variable is NaN: `loops` would start no loop at all, and `idleMs` would
-  // poll every millisecond. Refuse it before anything runs.
+  // poll every millisecond. So would an idleMs past what Node can schedule (about 24.8 days). Refuse them before
+  // anything runs.
   if (!Number.isInteger(loops) || loops < 1) throw new RangeError(`worker loop: loops must be a positive integer, got ${loops}`);
-  if (!Number.isFinite(idleMs) || idleMs < 0) throw new RangeError(`worker loop: idleMs must be a number of ms, 0 or more, got ${idleMs}`);
+  if (!Number.isFinite(idleMs) || idleMs < 0 || idleMs > MAX_TIMER_MS) {
+    throw new RangeError(`worker loop: idleMs must be a number of ms from 0 to ${MAX_TIMER_MS}, got ${idleMs}`);
+  }
   const pause = () => sleep(idleMs, undefined, { signal: o.signal }).catch(() => {});
   const loop = async () => {
     while (!o.signal.aborted) {

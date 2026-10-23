@@ -6,8 +6,11 @@
 //   handler threw, or the process died   → nothing stored: the same key can be retried
 import { createHash, randomUUID } from 'node:crypto';
 import type pg from 'pg';
-import { withClient } from './pg-transaction.ts';
+import { rollback, withClient } from './pg-transaction.ts';
 import { pgJson } from './pg-values.ts';
+
+/** The longest timer Node can schedule: it runs a longer one after 1 ms. */
+const MAX_TIMER_MS = 2 ** 31 - 1;
 
 export interface IdempotentRequest {
   /** Who is asking: tenant + principal (user or API-key id), from authentication, never from the request body. */
@@ -146,9 +149,9 @@ export class IdempotencyKeys {
    * writes through `tx`. Cost: two statements per request (claim and store).
    */
   run(req: IdempotentRequest, fn: (tx: pg.PoolClient) => Promise<StoredResponse>): Promise<IdempotentResult> {
-    return withClient(this.#pool, async (tx) => {
-      await tx.query('BEGIN');
+    return withClient(this.#pool, async (tx, _lost, discard) => {
       try {
+        await tx.query('BEGIN');
         const token = randomUUID();
         const earlier = await this.#claim(tx, req, token);
         if (earlier) {
@@ -162,7 +165,10 @@ export class IdempotencyKeys {
         await tx.query('COMMIT');
         return { ...res, replayed: false };
       } catch (err) {
-        await tx.query('ROLLBACK').catch(() => {});
+        // A handler whose query hit the client-side timeout left its transaction running on the server: the
+        // connection is destroyed rather than rolled back, or the next request on it would commit this order, and
+        // the client's retry would then place a second one.
+        await rollback(tx, err, discard);
         throw err;
       }
     });
@@ -183,7 +189,9 @@ export class IdempotencyKeys {
     if (earlier) return earlier;
     let res: StoredResponse;
     try {
-      res = await fn({ downstreamKey: downstreamKey(req), signal: AbortSignal.timeout(Math.max(1, Math.floor(this.#staleAfterSec * 500))) });
+      // Half of staleAfterSec, and never past what Node can schedule: a longer timer would abort after 1 ms.
+      const abortAfterMs = Math.min(MAX_TIMER_MS, Math.max(1, Math.floor(this.#staleAfterSec * 500)));
+      res = await fn({ downstreamKey: downstreamKey(req), signal: AbortSignal.timeout(abortAfterMs) });
     } catch (e) {
       // Failed, or outcome unknown (a timed-out call may still have gone through): release the key so the
       // client can retry it, unless the claim has been taken over meanwhile. If the call did happen, the
@@ -202,6 +210,8 @@ export class IdempotencyKeys {
    * late retry runs the request again.
    */
   async prune(batchSize = 5000): Promise<number> {
+    // A batch of 0 deletes nothing, and "fewer than batchSize" never holds: the loop would never end.
+    if (!Number.isInteger(batchSize) || batchSize < 1) throw new RangeError(`idempotency keys: batchSize must be a positive integer, got ${batchSize}`);
     let total = 0;
     for (;;) {
       const res = await this.#pool.query(

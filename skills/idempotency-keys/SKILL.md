@@ -50,6 +50,10 @@ POST /orders   Idempotency-Key: 7f0c2a8e-…
    - **Effects in this database** → `runIdempotent(pool, req, async (tx) => …)`. The claim, the handler's writes (all
      through `tx`) and the stored response commit in **one transaction**. A thrown error or a crash leaves nothing
      behind, so a retry runs cleanly. It costs two statements per request: about half a millisecond here.
+     - A query that outlives the pool's client-side `query_timeout` (resilience-testing) is still running on the
+       server, inside this transaction. Its connection is destroyed, which makes the server roll the order back.
+       Released to the pool, it was committed by the next request on that connection: the client had been told the
+       order failed, and its retry placed a second one.
    - **External effects** → `runIdempotentExternal(pool, req, async ({ downstreamKey, signal }) => …)`.
      - The claim commits first, so duplicates see it, and no transaction stays open across the network call. The
        response is stored after it.

@@ -42,7 +42,10 @@ assert: fails fast · falls back · loses nothing · recovers without a restart
    outcome ("fell back to the local bucket", "served from the origin") and recovery ("Redis again after it
    recovered").
 4. **Fix what they find.** The usual list:
-   - a client-side `query_timeout`;
+   - a client-side `query_timeout`, and a client whose query hit it destroyed, not released: pg stops waiting, but
+     the server keeps running the statement in its transaction. Released, the connection made the next caller wait
+     behind it, and the next caller's COMMIT committed the writes of a request told it had failed. The kit's
+     `withClient` and `withTransaction` destroy it;
    - `connectionTimeoutMillis`;
    - error listeners on pools and checked-out clients;
    - connecting before reporting ready;

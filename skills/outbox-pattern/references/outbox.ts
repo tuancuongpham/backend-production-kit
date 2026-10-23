@@ -85,7 +85,10 @@ export class OutboxRelay {
     this.#batchSize = o.batchSize ?? 100;
     this.#publishTimeoutMs = o.publishTimeoutMs ?? 10_000;
     if (!Number.isInteger(this.#batchSize) || this.#batchSize < 1) throw new RangeError('outbox relay: batchSize must be a positive integer');
-    if (!(this.#publishTimeoutMs > 0)) throw new RangeError('outbox relay: publishTimeoutMs must be positive');
+    // Past what Node can schedule (about 24.8 days) the timeout runs after 1 ms: every publish would fail, the outbox stop.
+    if (!(this.#publishTimeoutMs > 0) || this.#publishTimeoutMs > 2 ** 31 - 1) {
+      throw new RangeError(`outbox relay: publishTimeoutMs must be a number of ms from 1 to ${2 ** 31 - 1}, got ${this.#publishTimeoutMs}`);
+    }
   }
 
   /** One batch. Returns the number published; 0 also when another relay holds the lock. */

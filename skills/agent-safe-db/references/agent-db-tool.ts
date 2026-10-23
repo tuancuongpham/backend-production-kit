@@ -173,12 +173,25 @@ export interface ToolRunResult {
   truncated: boolean;
 }
 
-/** Runs the developer-written tools as the agent role: read-only, tenant-scoped, time-boxed, row-capped, audited. */
-/** A count or a duration from the options: a positive integer. From an unset environment variable it would be NaN. */
-function positiveInt(name: string, v: number): number {
-  if (!Number.isInteger(v) || v < 1) throw new RangeError(`agent db: ${name} must be a positive integer, got ${v}`);
+/** The longest timer Node can schedule (it runs a longer one after 1 ms), and the largest statement_timeout. */
+const MAX_TIMER_MS = 2 ** 31 - 1;
+
+/**
+ * A count or a duration from the options: a positive integer. From an unset environment variable it would be NaN; a
+ * duration past MAX_TIMER_MS would time every call out after 1 ms.
+ */
+function positiveInt(name: string, v: number, max = Number.MAX_SAFE_INTEGER): number {
+  if (!Number.isInteger(v) || v < 1 || v > max) throw new RangeError(`agent db: ${name} must be an integer from 1 to ${max}, got ${v}`);
   return v;
 }
+
+/**
+ * The tool's SQL ends up inside `SELECT * FROM (…) AS q LIMIT n`, where a trailing semicolon is a syntax error on
+ * every call. (A trailing `-- comment` is fine: the subquery is closed on the next line.)
+ */
+const TRAILING_SEMICOLON = /;\s*(?:--[^\n]*\s*)*$/;
+
+/** Runs the developer-written tools as the agent role: read-only, tenant-scoped, time-boxed, row-capped, audited. */
 
 export class AgentDb {
   readonly #pool: pg.Pool;
@@ -190,14 +203,18 @@ export class AgentDb {
   constructor(o: AgentDbOptions) {
     this.#tools = o.tools;
     this.#audit = o.audit;
-    this.#timeoutMs = positiveInt('statementTimeoutMs', o.statementTimeoutMs ?? 2000);
+    // The client-side query_timeout below is this plus a second, and Node can't schedule a timer past MAX_TIMER_MS.
+    this.#timeoutMs = positiveInt('statementTimeoutMs', o.statementTimeoutMs ?? 2000, MAX_TIMER_MS - 1000);
     // NaN here made every call a syntax error (LIMIT NaN); a pool of NaN or a connect timeout of 0 never times out.
     this.#maxRows = positiveInt('maxRows', o.maxRows ?? 200);
-    for (const [name, tool] of Object.entries(o.tools)) if (tool.maxRows !== undefined) positiveInt(`${name}.maxRows`, tool.maxRows);
+    for (const [name, tool] of Object.entries(o.tools)) {
+      if (tool.maxRows !== undefined) positiveInt(`${name}.maxRows`, tool.maxRows);
+      if (TRAILING_SEMICOLON.test(tool.sql)) throw new Error(`agent db: ${name}: its SQL ends with a semicolon, a syntax error once it is wrapped as a subquery`);
+    }
     this.#pool = new pg.Pool({
       connectionString: o.connectionString,
       max: positiveInt('poolSize', o.poolSize ?? 5),
-      connectionTimeoutMillis: positiveInt('connectTimeoutMs', o.connectTimeoutMs ?? 3000),
+      connectionTimeoutMillis: positiveInt('connectTimeoutMs', o.connectTimeoutMs ?? 3000, MAX_TIMER_MS),
       // The server-side statement_timeout limits the query; this limits the wait for its answer over a slow network.
       query_timeout: this.#timeoutMs + 1000,
       application_name: 'agent-db', // find the agent's sessions in pg_stat_activity
@@ -245,8 +262,9 @@ export class AgentDb {
     try {
       res = await withTransaction(
         this.#pool,
-        // Fetch one extra row to know whether we truncated.
-        (tx) => tx.query(`SELECT * FROM (${tool.sql}) AS q LIMIT ${maxRows + 1}`, values),
+        // Fetch one extra row to know whether we truncated. The line breaks keep a trailing `-- comment` in the tool's
+        // SQL from swallowing the closing parenthesis: the call was a syntax error every time.
+        (tx) => tx.query(`SELECT * FROM (\n${tool.sql}\n) AS q LIMIT ${maxRows + 1}`, values),
         // BEGIN and both settings in one round trip instead of two (a parameterized query can't share a call with
         // BEGIN). Inlining is safe only because the tenant id passed UUID_RE above and the timeout is an integer
         // checked at startup: nothing else can be in this string. Never inline a value that hasn't passed a check

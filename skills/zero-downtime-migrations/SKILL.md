@@ -54,7 +54,12 @@ against traffic.
    Pass `signal` (a job's `ctx.signal`, or one aborted on SIGTERM): the backfill stops after the current batch, and
    the error carries `lastId` the same way. `onBatch` reports progress only; it can't stop the backfill.
    `batchSize` must be a positive integer and `retries` and `pauseMs` integers of 0 or more: `batchSize: 0`
-   "finished" at once with nothing done, and NaN retries retried a deadlocked batch forever.
+   "finished" at once with nothing done, and NaN retries retried a deadlocked batch forever. Durations stop at
+   2,147,483,647 ms: Node runs a longer pause after 1 ms, and Postgres refuses a longer `lock_timeout`.
+   - The ids a batch **selected** decide where the next batch starts and whether it was the last. On a table the app
+     deletes from, a batch that waited for a row lock skips the row deleted meanwhile and updates fewer rows than it
+     selected. Ending on that count stopped the backfill after its first batch, reported as finished, with most of
+     the table still to do.
    Copy `hooks.ts` and `pg-transaction.ts` along with `migrate.ts`: they are the kit's shared building blocks.
 5. **Check before shipping.**
    - Every new index has `pg_index.indisvalid = true`.

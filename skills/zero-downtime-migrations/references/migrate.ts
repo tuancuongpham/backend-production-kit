@@ -35,9 +35,18 @@ const LOCK_NOT_AVAILABLE = '55P03';
 /** Errors after which the same statement can simply run again: deadlock, serialization failure, lock timeout. */
 const TRANSIENT = new Set(['40P01', '40001', LOCK_NOT_AVAILABLE]);
 const codeOf = (err: unknown) => (err as { code?: string }).code;
-/** A setting: an integer of at least `min`. From an unset environment variable it is NaN, and a NaN attempt count retries forever. */
-const ms = (n: number, name: string, min = 0) => {
-  if (!Number.isInteger(n) || n < min) throw new RangeError(`${name} must be an integer of at least ${min}, got ${n}`);
+/**
+ * The longest timer Node can schedule (it runs a longer one after 1 ms), and the largest lock_timeout or
+ * statement_timeout Postgres accepts.
+ */
+const MAX_MS = 2 ** 31 - 1;
+/**
+ * A setting: an integer from `min` to `max`. From an unset environment variable it is NaN, and a NaN attempt count
+ * retries forever. A duration past MAX_MS is a pause Node runs after 1 ms, or a timeout Postgres refuses on every
+ * attempt.
+ */
+const ms = (n: number, name: string, min = 0, max = MAX_MS) => {
+  if (!Number.isInteger(n) || n < min || n > max) throw new RangeError(`${name} must be an integer from ${min} to ${max}, got ${n}`);
   return n;
 };
 /** Doubling from `base` up to 30 s, with jitter. */
@@ -146,24 +155,30 @@ export interface BackfillOptions {
 export async function backfill(pool: pg.Pool, o: BackfillOptions): Promise<{ updated: number; batches: number; lastId: string | null }> {
   const id = o.idColumn ?? 'id';
   // batchSize 0 "finished" at once with nothing done; NaN retries retried a deadlocked batch forever.
-  const batchSize = ms(o.batchSize ?? 1000, 'batchSize', 1);
-  const retries = ms(o.retries ?? 5, 'retries');
+  const batchSize = ms(o.batchSize ?? 1000, 'batchSize', 1, Number.MAX_SAFE_INTEGER);
+  const retries = ms(o.retries ?? 5, 'retries', 0, Number.MAX_SAFE_INTEGER);
   const pauseMs = ms(o.pauseMs ?? 50, 'pauseMs');
   let lastId = o.afterId == null ? null : String(o.afterId);
   let updated = 0;
   let batches = 0;
-  const batch = async () => {
+  // The ids a batch selected decide where the next one starts and whether it was the last. The rows it updated can be
+  // fewer: a row the app deleted while the batch waited for its lock is skipped. Ending on the update count stopped
+  // the backfill after the first such batch, reported as done with most of the table left.
+  const batch = async (): Promise<{ selected: number; last: string | null; changed: number }> => {
     for (let attempt = 1; ; attempt++) {
       try {
-        return await pool.query(
+        const { rows } = await pool.query(
           `WITH batch AS (
              SELECT ${id} FROM ${o.table}
              WHERE ($1::bigint IS NULL OR ${id} > $1) ${o.where ? `AND (${o.where})` : ''}
-             ORDER BY ${id} LIMIT $2)
-           UPDATE ${o.table} t SET ${o.set} FROM batch WHERE t.${id} = batch.${id}
-           RETURNING t.${id} AS id`,
+             ORDER BY ${id} LIMIT $2),
+           changed AS (
+             UPDATE ${o.table} t SET ${o.set} FROM batch WHERE t.${id} = batch.${id} RETURNING 1)
+           SELECT (SELECT count(*) FROM batch)::int AS selected, (SELECT max(${id}) FROM batch)::text AS last,
+                  (SELECT count(*) FROM changed)::int AS changed`,
           [lastId, batchSize],
         );
+        return rows[0];
       } catch (err) {
         // One statement per batch: a failed batch changed nothing, so running it again is safe.
         if (!TRANSIENT.has(codeOf(err) ?? '') || attempt > retries) throw Object.assign(err as Error, { lastId });
@@ -178,13 +193,13 @@ export async function backfill(pool: pg.Pool, o: BackfillOptions): Promise<{ upd
   };
   for (;;) {
     stopIfAborted();
-    const { rows } = await batch();
-    if (rows.length === 0) return { updated, batches, lastId };
-    lastId = String(rows.reduce((max, r) => (BigInt(r.id) > BigInt(max) ? r.id : max), rows[0].id));
-    updated += rows.length;
+    const { selected, last, changed } = await batch();
+    if (selected === 0) return { updated, batches, lastId };
+    lastId = last;
+    updated += changed;
     batches++;
-    callHook(o.onBatch, updated, lastId); // a progress logger that fails must not stop the backfill halfway
-    if (rows.length < batchSize) return { updated, batches, lastId };
+    callHook(o.onBatch, updated, lastId!); // a progress logger that fails must not stop the backfill halfway
+    if (selected < batchSize) return { updated, batches, lastId };
     await sleep(pauseMs, undefined, { signal: o.signal }).catch(() => {}); // an abort ends the pause at once
   }
 }

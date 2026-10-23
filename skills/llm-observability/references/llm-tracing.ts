@@ -109,6 +109,40 @@ function safely(span: Span, what: string, record: () => void) {
   }
 }
 
+/**
+ * Records a failure on the span, through `redact` like the prompt and the answer: a provider's 400 that quotes the
+ * prompt, or a database error naming the customer's email ("Key (email)=(…) already exists"), reached the trace
+ * backend in clear while the prompt beside it was redacted. A redactor that throws loses the text, not the failure.
+ */
+function recordFailure(span: Span, err: unknown, redact: ((s: string) => string) | undefined) {
+  const e = err instanceof Error ? err : { name: 'Error', message: textOf(err), stack: undefined, code: undefined };
+  const clean = (s: string) => {
+    if (!redact) return s;
+    try {
+      return redact(s);
+    } catch {
+      return '[not recorded: the redactor failed]';
+    }
+  };
+  const code = (e as { code?: unknown }).code;
+  span.recordException({
+    name: e.name,
+    message: clean(e.message),
+    ...(e.stack ? { stack: clean(e.stack) } : {}),
+    ...(typeof code === 'string' || typeof code === 'number' ? { code } : {}),
+  });
+  span.setStatus({ code: SpanStatusCode.ERROR, message: clean(e.message) });
+}
+
+/** String(value), without throwing for a value that has no string form (an object without a prototype). */
+function textOf(value: unknown): string {
+  try {
+    return String(value);
+  } catch {
+    return '[unreadable]';
+  }
+}
+
 /** Wrap one model call. Creates a CLIENT span as a child of whatever is active (HTTP request, job). */
 export async function withLlmSpan<T extends LlmCallResult>(
   tracer: Tracer,
@@ -159,8 +193,7 @@ export async function withLlmSpan<T extends LlmCallResult>(
       });
       return result;
     } catch (err) {
-      span.recordException(err as Error);
-      span.setStatus({ code: SpanStatusCode.ERROR, message: err instanceof Error ? err.message : String(err) });
+      recordFailure(span, err, opts.redact);
       throw err;
     } finally {
       span.end();
@@ -198,8 +231,7 @@ export async function withRetrievalSpan<T extends RetrievedDoc[]>(
       });
       return docs;
     } catch (err) {
-      span.recordException(err as Error);
-      span.setStatus({ code: SpanStatusCode.ERROR });
+      recordFailure(span, err, opts.redact);
       throw err;
     } finally {
       span.end();

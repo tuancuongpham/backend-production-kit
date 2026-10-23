@@ -109,6 +109,31 @@ describe('llm-observability', () => {
     assert.ok(s.events.some((e) => e.name === 'exception'));
   });
 
+  it('a failure that is not an Error is recorded as text; a redactor that throws loses the text, not the failure', async () => {
+    await assert.rejects(
+      withLlmSpan(
+        tracer,
+        { provider: 'openai', model: 'm2', tenantId: 't', messages: [] },
+        // eslint-disable-next-line @typescript-eslint/prefer-promise-reject-errors -- the case under test: an SDK that rejects with a string
+        async () => Promise.reject('upstream said no to lan@shop.vn'),
+        { redact: redactor.redactString },
+      ),
+    );
+    assert.deepEqual(span('chat m2').status, { code: 2, message: 'upstream said no to [EMAIL]' });
+    await assert.rejects(
+      withLlmSpan(tracer, { provider: 'openai', model: 'm3', tenantId: 't', messages: [] }, async () => { throw new Error('quota of lan@shop.vn'); }, {
+        captureContent: false,
+        redact: () => {
+          throw new Error('redactor bug');
+        },
+      }),
+      /quota/,
+    );
+    const failed = span('chat m3');
+    assert.equal(failed.status.code, 2);
+    assert.ok(!JSON.stringify(failed.events).includes('lan@shop.vn'));
+  });
+
   it('a failed retrieval marks its span too, and the error reaches the caller', async () => {
     await assert.rejects(withRetrievalSpan(tracer, 'chính sách đổi trả', async () => Promise.reject(new Error('vector index offline'))), /offline/);
     const s = exporter.getFinishedSpans().filter((x) => x.name === 'retrieve').at(-1)!;

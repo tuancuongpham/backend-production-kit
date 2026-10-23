@@ -37,6 +37,13 @@ export interface HardenedServerOptions {
   /** Max wait for in-flight requests. Keep below K8s terminationGracePeriodSeconds (default 30s). */
   shutdownGraceMs?: number; // default 20s
   onShutdown?: Array<() => Promise<unknown>>; // close DB pools, flush telemetry...
+  /**
+   * How long each onShutdown hook may take (default 5 s); one that is still running is logged and the next one
+   * starts. Without it, a hook that never settled (pool.end() waiting for a client that was never released, a flush
+   * to a collector that is down) kept the process alive until the orchestrator killed it, and the hooks after it
+   * never ran.
+   */
+  shutdownHookTimeoutMs?: number;
   log?: (msg: string, extra?: Record<string, unknown>) => void;
   /** After a 413, how long the connection stays open (not read from) so the client can read the answer. */
   rejectLingerMs?: number; // default 2s
@@ -123,14 +130,18 @@ export function deadline(ms: number, parent?: AbortSignal): AbortSignal {
 
 const REQUEST_ID_RE = /^[A-Za-z0-9._-]{1,128}$/;
 
+/** The longest timer Node can schedule: it runs a longer one after 1 ms. */
+const MAX_TIMER_MS = 2 ** 31 - 1;
+
 /**
  * A duration or count from the options. A number read from an unset environment variable is NaN, and NaN compares
- * false with everything: maxInFlight would shed nothing, a NaN grace period would cut every request at once. Refused
- * at startup instead.
+ * false with everything: maxInFlight would shed nothing, a NaN grace period would cut every request at once. A
+ * duration past what Node can schedule (about 24.8 days) runs after 1 ms: no drain at all, keep-alive sockets closed
+ * at once. Both are refused at startup.
  */
-function setting(name: string, value: number | undefined, fallback: number, min: number): number {
+function setting(name: string, value: number | undefined, fallback: number, min: number, max = MAX_TIMER_MS): number {
   const v = value ?? fallback;
-  if (!Number.isFinite(v) || v < min) throw new RangeError(`hardened server: ${name} must be a number of at least ${min}, got ${v}`);
+  if (!Number.isFinite(v) || v < min || v > max) throw new RangeError(`hardened server: ${name} must be a number from ${min} to ${max}, got ${v}`);
   return v;
 }
 
@@ -139,9 +150,10 @@ function setting(name: string, value: number | undefined, fallback: number, min:
  * shutdown hooks (`installSignalHandlers(app.shutdown)`), where a detached class method would lose `this`.
  */
 export function createHardenedServer(o: HardenedServerOptions) {
-  const maxInFlight = setting('maxInFlight', o.maxInFlight, 256, 1);
+  const maxInFlight = setting('maxInFlight', o.maxInFlight, 256, 1, Number.MAX_SAFE_INTEGER);
   const drainDelayMs = setting('drainDelayMs', o.drainDelayMs, 5_000, 0);
   const shutdownGraceMs = setting('shutdownGraceMs', o.shutdownGraceMs, 20_000, 0);
+  const shutdownHookTimeoutMs = setting('shutdownHookTimeoutMs', o.shutdownHookTimeoutMs, 5_000, 1);
   const rejectLingerMs = setting('rejectLingerMs', o.rejectLingerMs, 2_000, 0);
   const headersTimeoutMs = setting('headersTimeoutMs', o.headersTimeoutMs, 10_000, 0);
   const requestTimeoutMs = setting('requestTimeoutMs', o.requestTimeoutMs, 30_000, 0);
@@ -237,7 +249,10 @@ export function createHardenedServer(o: HardenedServerOptions) {
       server.closeAllConnections();
       await closed;
       for (const hook of o.onShutdown ?? []) {
-        await hook().catch((e) => log('shutdown hook failed', { error: String(e) }));
+        // In order, each within its deadline: one that hangs or throws (even synchronously) doesn't stop the rest.
+        await withTimeout(Promise.resolve().then(hook), shutdownHookTimeoutMs, () => new Error(`still running after ${shutdownHookTimeoutMs} ms`)).catch(
+          (e) => log('shutdown hook failed', { error: String(e) }),
+        );
       }
       log('shutdown: done', { forced: !finished });
       return { forced: !finished };

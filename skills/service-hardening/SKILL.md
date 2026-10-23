@@ -35,7 +35,10 @@ Start from [references/server.ts](references/server.ts) (node:http; wrap Express
       another instance. Answering them 503 would be the very deploy error the delay exists to avoid;
    2. it stops accepting, closes idle keep-alive sockets and ends long-lived responses;
    3. it waits for in-flight requests, up to `shutdownGraceMs`, then force-closes the rest;
-   4. it runs the `onShutdown` hooks (DB pools, telemetry flush).
+   4. it runs the `onShutdown` hooks (DB pools, telemetry flush), in order, each within `shutdownHookTimeoutMs`
+      (default 5 s). A hook that never settled (`pool.end()` waiting for a client that was never released, a flush
+      to a collector that is down) kept the process alive until the orchestrator killed it, and the hooks after it
+      never ran; now it is logged and the next one starts.
 
    A second signal force-exits. In Docker, run node as PID 1 with `exec`/`--init`, or `tini`, so SIGTERM actually
    reaches it.
@@ -46,7 +49,8 @@ Start from [references/server.ts](references/server.ts) (node:http; wrap Express
 9. **Config validation at startup**: fail fast on missing env vars, before readiness ever turns green.
    `createHardenedServer` refuses a NaN or negative setting with a `RangeError`: `Number(process.env.X)` of an
    unset variable is NaN, and NaN compares false with everything. `maxInFlight: NaN` shed nothing, and a NaN grace
-   period cut every in-flight request the moment a deploy started.
+   period cut every in-flight request the moment a deploy started. So is a duration past 2,147,483,647 ms (about
+   24.8 days): Node runs a longer timer after 1 ms, which meant no drain at all and keep-alive sockets closed at once.
    `listen()` rejects when the port is taken (`EADDRINUSE`) instead of crashing on an unhandled `'error'` event.
 
 The full go-live list is in [references/checklist.md](references/checklist.md).

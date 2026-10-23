@@ -47,6 +47,9 @@ export interface CacheOptions {
   random?: () => number;
 }
 
+/** The longest timer Node can schedule: it runs a longer one after 1 ms. */
+const MAX_TIMER_MS = 2 ** 31 - 1;
+
 /** Redis couldn't be asked: down, too slow, or the breaker is open. */
 const UNAVAILABLE = Symbol('redis unavailable');
 /** Thrown instead of calling Redis while the breaker is open. Expected, so not reported. */
@@ -114,6 +117,8 @@ export class ReadThroughCache {
     this.#lockMs = Math.ceil(setting('lockMs', o.lockMs ?? 10_000, 0, true));
     this.#waitMs = setting('waitMs', o.waitMs ?? 2_000, 0);
     this.#timeoutMs = setting('timeoutMs', o.timeoutMs ?? 50, 0, true);
+    // Past what Node can schedule (about 24.8 days), the timeout runs after 1 ms: every Redis call would fail.
+    if (this.#timeoutMs > MAX_TIMER_MS) throw new RangeError(`cache: timeoutMs must be at most ${MAX_TIMER_MS}, got ${this.#timeoutMs}`);
     this.#codec = o.codec ?? jsonCodec;
     this.#breaker = new CircuitBreaker(o.breaker ?? { threshold: 3, cooldownMs: 1000 });
     this.#onError = o.onError;

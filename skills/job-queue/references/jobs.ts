@@ -97,6 +97,9 @@ export interface RunOptions {
   onError?: (err: unknown) => unknown;
 }
 
+/** The longest timer Node can schedule: it runs a longer one after 1 ms. */
+const MAX_TIMER_MS = 2 ** 31 - 1;
+
 /** Exponential backoff with "equal jitter": never ~0, never synchronized across jobs. */
 export function backoffMs(attempt: number, baseMs: number, maxMs: number, random = Math.random): number {
   const exp = Math.min(maxMs, baseMs * 2 ** Math.max(0, attempt - 1));
@@ -137,6 +140,8 @@ export class JobWorker {
     this.#batchSize = positive(o.batchSize ?? 1, 'batchSize');
     this.#leaseSec = positive(o.leaseSec ?? 60, 'leaseSec', false);
     this.#timeoutMs = positive(o.timeoutMs ?? 15 * 60_000, 'timeoutMs', false);
+    // Node runs a timer longer than it can schedule (about 24.8 days) after 1 ms: every job would time out at once.
+    if (this.#timeoutMs > MAX_TIMER_MS) throw new RangeError(`job worker: timeoutMs must be at most ${MAX_TIMER_MS}, got ${this.#timeoutMs}`);
     this.#baseDelayMs = delay(o.baseDelayMs ?? 1_000, 'baseDelayMs');
     this.#maxDelayMs = delay(o.maxDelayMs ?? 3_600_000, 'maxDelayMs');
     this.#random = o.random ?? Math.random;
@@ -165,7 +170,7 @@ export class JobWorker {
         },
         () => {}, // a missed beat is fine; the lease outlasts three of them
       );
-    }, Math.max(10, (this.#leaseSec * 1000) / 3));
+    }, Math.min(MAX_TIMER_MS, Math.max(10, (this.#leaseSec * 1000) / 3))); // a longer interval would beat every ms
     const results: Outcome[] = [];
     try {
       for (const job of batch) {
@@ -467,6 +472,8 @@ export async function retryDead(pool: pg.Pool, filter: { ids?: string[]; queue?:
 export async function pruneJobs(pool: pg.Pool, opts: { olderThanDays?: number; batchSize?: number } = {}): Promise<number> {
   const olderThanDays = opts.olderThanDays ?? 7;
   const batchSize = opts.batchSize ?? 5000;
+  // A batch of 0 deletes nothing, and "fewer than batchSize" never holds: the loop would never end.
+  if (!Number.isInteger(batchSize) || batchSize < 1) throw new RangeError(`pruneJobs: batchSize must be a positive integer, got ${batchSize}`);
   let total = 0;
   for (;;) {
     const res = await pool.query(

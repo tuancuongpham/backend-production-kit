@@ -36,7 +36,11 @@ export class CircuitBreaker {
 
   get state(): BreakerState {
     if (this.#failures < this.#threshold) return 'closed';
-    return this.#now() - this.#openedAt >= this.#cooldownMs ? 'half-open' : 'open';
+    const now = this.#now();
+    // A wall clock stepped back (NTP correcting a drifted host, a VM resumed) would keep the circuit open for the whole
+    // step, an hour of fallback for an hour's correction. The cooldown restarts from the time the step is seen instead.
+    if (now < this.#openedAt) this.#openedAt = now;
+    return now - this.#openedAt >= this.#cooldownMs ? 'half-open' : 'open';
   }
 
   /**
@@ -48,6 +52,7 @@ export class CircuitBreaker {
     if (state === 'closed') return true;
     if (state === 'open') return false;
     const now = this.#now();
+    if (this.#probeSince !== null && now < this.#probeSince) this.#probeSince = now; // the clock stepped back
     if (this.#probeSince !== null && now - this.#probeSince < this.#cooldownMs) return false;
     this.#probeSince = now;
     return true;

@@ -13,6 +13,8 @@ import { withTimeout } from './with-timeout.ts';
 const LUA = readFileSync(new URL('./token-bucket.lua', import.meta.url), 'utf8');
 // EVALSHA sends 40 bytes instead of the whole script on every request; Redis also skips re-hashing it.
 const LUA_SHA = createHash('sha1').update(LUA).digest('hex');
+/** The longest timer Node can schedule: it runs a longer one after 1 ms. */
+const MAX_TIMER_MS = 2 ** 31 - 1;
 
 /**
  * What to do when Redis can't answer in time:
@@ -68,7 +70,9 @@ class LocalBuckets {
     // Re-insert so Map order is least-recently-used first. With plain set() an existing key keeps its
     // original position, so the busiest (oldest) subject was evicted first and came back with a full bucket.
     this.#buckets.delete(key);
-    b.tokens = Math.min(this.#capacity, b.tokens + ((now - b.ts) * this.#rate) / 1000);
+    // No time is negative: a wall clock stepped back an hour (NTP correcting a drifted host) emptied the bucket for that
+    // hour. The Redis script clamps the same way.
+    b.tokens = Math.min(this.#capacity, b.tokens + (Math.max(0, now - b.ts) * this.#rate) / 1000);
     b.ts = now;
     let allowed = false;
     let retryAfterMs = 0;
@@ -109,7 +113,8 @@ export class RateLimiter {
     const instances = o.instances ?? 1;
     if (!Number.isInteger(instances) || instances < 1) throw new RangeError(`rate limiter: instances must be a positive integer, got ${instances}`);
     const timeoutMs = o.timeoutMs ?? 50;
-    if (!(timeoutMs > 0) || !Number.isFinite(timeoutMs)) throw new RangeError(`rate limiter: timeoutMs must be a positive number, got ${timeoutMs}`);
+    // Past what Node can schedule (about 24.8 days) the timeout runs after 1 ms, the same as NaN: every check fails over.
+    if (!(timeoutMs > 0) || timeoutMs > MAX_TIMER_MS) throw new RangeError(`rate limiter: timeoutMs must be a number of ms from 1 to ${MAX_TIMER_MS}, got ${timeoutMs}`);
     const now = o.now ?? Date.now;
     this.#redis = o.redis;
     this.#capacity = o.capacity;

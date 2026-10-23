@@ -46,8 +46,21 @@ export const fillPrompt = (c: JudgeCase) => {
 
 /** Grades every case, `concurrency` judge calls at a time (default 4): at about a second per call, one at a time is slow. */
 export async function runJudge(cases: JudgeCase[], judge: Judge, opts: RunOptions = {}) {
-  const results = await mapInOrder(cases, async (c) => ({ ...c, ...(await judge(c)) }), opts);
+  const results = await mapInOrder(cases, async (c) => ({ ...c, ...checkedReply(c, await judge(c)) }), opts);
   return { results, passRate: results.filter((r) => r.verdict === 'pass').length / Math.max(1, results.length) };
+}
+
+/**
+ * The judge's reply, checked: it is usually a model's JSON, parsed as written. "Pass" or " FAIL " counts as what it
+ * says (it counted as a fail); any other verdict is an error naming the case, not a silent fail. Only verdict and
+ * reason are taken: extra keys in the reply (a "human" that the answer under test talked the judge into) overwrote
+ * the case, human label included, and the agreement with humans was then measured against the judge itself.
+ */
+function checkedReply(c: JudgeCase, reply: unknown): { verdict: Verdict; reason: string } {
+  const r = (reply ?? {}) as { verdict?: unknown; reason?: unknown };
+  const verdict = typeof r.verdict === 'string' ? r.verdict.trim().toLowerCase() : r.verdict;
+  if (verdict !== 'pass' && verdict !== 'fail') throw new TypeError(`judge: case ${c.id}: verdict must be "pass" or "fail", got ${JSON.stringify(r.verdict)}`);
+  return { verdict, reason: typeof r.reason === 'string' ? r.reason : '' };
 }
 
 /** Cohen's kappa: agreement corrected for chance. 1 = perfect, 0 = no better than chance. */

@@ -24,6 +24,9 @@ export interface SseOptions {
   closeOn?: AbortSignal;
 }
 
+/** The longest timer Node can schedule: it runs a longer one after 1 ms. */
+const MAX_TIMER_MS = 2 ** 31 - 1;
+
 /** The line breaks of the event-stream format: CRLF, LF, and a lone CR. */
 const LINE_BREAK = /\r\n|\r|\n/;
 
@@ -68,11 +71,14 @@ export class SseStream {
 
   constructor(req: http.IncomingMessage, res: http.ServerResponse, opts: SseOptions = {}) {
     // Checked before anything is written. From an unset environment variable these are NaN: a heartbeat every
-    // millisecond, and a buffer limit that never refuses (`length > NaN` is never true).
+    // millisecond, and a buffer limit that never refuses (`length > NaN` is never true). A heartbeat past what Node can
+    // schedule (about 24.8 days, someone's "never") pinged every millisecond too.
     const heartbeatMs = opts.heartbeatMs ?? 15_000;
     const retryMs = opts.retryMs ?? 3000;
     const maxBuffered = opts.maxBufferedBytes ?? 256 * 1024;
-    if (!Number.isInteger(heartbeatMs) || heartbeatMs < 1) throw new RangeError(`sse: heartbeatMs must be a positive integer, got ${heartbeatMs}`);
+    if (!Number.isInteger(heartbeatMs) || heartbeatMs < 1 || heartbeatMs > MAX_TIMER_MS) {
+      throw new RangeError(`sse: heartbeatMs must be an integer from 1 to ${MAX_TIMER_MS}, got ${heartbeatMs}`);
+    }
     if (!Number.isInteger(retryMs) || retryMs < 0) throw new RangeError(`sse: retryMs must be an integer of 0 or more, got ${retryMs}`);
     if (!(maxBuffered > 0) || !Number.isFinite(maxBuffered)) throw new RangeError(`sse: maxBufferedBytes must be a positive number, got ${maxBuffered}`);
     this.#res = res;

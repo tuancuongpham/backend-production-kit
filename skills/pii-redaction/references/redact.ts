@@ -192,7 +192,7 @@ export function createRedactor(opts: RedactorOptions = {}) {
     if (value instanceof Error) {
       // What makes an error debuggable, and nothing else: an HTTP client's error also carries the request config, with
       // its Authorization header. Postgres puts the offending value in `detail`: Key (email)=(an@email.vn) already exists.
-      const e = value as Error & { code?: unknown; detail?: unknown; cause?: unknown };
+      const e = value as Error & { code?: unknown; detail?: unknown; cause?: unknown; errors?: unknown };
       return {
         name: textOf(e.name),
         message: redactString(textOf(e.message)),
@@ -200,6 +200,8 @@ export function createRedactor(opts: RedactorOptions = {}) {
         ...(typeof e.detail === 'string' ? { detail: redactString(e.detail) } : {}),
         stack: e.stack ? redactString(textOf(e.stack)) : undefined,
         ...(e.cause !== undefined ? { cause: redactValue(e.cause, depth + 1, seen) } : {}),
+        // An AggregateError's message only names what failed (a scheduler tick, Promise.any); its errors say why.
+        ...(Array.isArray(e.errors) ? { errors: e.errors.map((x) => redactValue(x, depth + 1, seen)) } : {}),
       };
     }
     if (value instanceof Date) return value;
@@ -242,13 +244,24 @@ export type Redactor = ReturnType<typeof createRedactor>;
  * `redact` paths (pino's fast path) handle known locations; the formatter catches free text.
  */
 export function pinoRedactionOptions(redactor: Redactor) {
+  /**
+   * pino builds the message from the arguments after this hook (logger.info('order %j', order)), and formatters.log
+   * never sees that message: every argument is redacted here, not only strings. An Error becomes its redacted text,
+   * as `%s` prints it.
+   */
+  const argument = (a: unknown) => {
+    if (typeof a === 'string') return redactor.redactString(a);
+    if (a instanceof Error) return redactor.redactString(textOf(a));
+    return a !== null && typeof a === 'object' ? redactor.redactValue(a) : a;
+  };
   return {
     formatters: {
       log: (obj: Record<string, unknown>) => redactor.redactValue(obj) as Record<string, unknown>,
     },
     hooks: {
       logMethod(this: unknown, args: unknown[], method: (...a: unknown[]) => void) {
-        method.apply(this, args.map((a) => (typeof a === 'string' ? redactor.redactString(a) : a)));
+        // A leading object (an Error too) is pino's merging object: formatters.log redacts it once pino has it.
+        method.apply(this, args.map((a, i) => (i === 0 && a !== null && typeof a === 'object' ? a : argument(a))));
       },
     },
   };

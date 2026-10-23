@@ -138,6 +138,26 @@ describe('webhook-ingestion', () => {
     assert.equal((await pool.query(`SELECT count(*)::int n FROM webhook_inbox WHERE status <> 'done'`)).rows[0].n, 0);
   });
 
+  it("a claimed event whose lease passed to another worker before its turn in the batch isn't run by this one", async () => {
+    await ingest(pool, evt('evt_q1'));
+    await ingest(pool, evt('evt_q2'));
+    const ran: string[] = [];
+    const worker = createInboxWorker({
+      pool,
+      batchSize: 2,
+      handlers: {
+        'stripe:payment.succeeded': async (row, tx) => {
+          ran.push(row.event_id);
+          // While this one runs, another worker takes the other over (as stuck, with a lease of its own).
+          await pool.query(`UPDATE webhook_inbox SET lease_id = gen_random_uuid() WHERE event_id <> $1`, [row.event_id]);
+          await creditHandler(row, tx);
+        },
+      },
+    });
+    assert.deepEqual((await worker.processOnce()).sort(), ['done', 'lost']);
+    assert.equal(ran.length, 1, 'the handler ran for the event this worker still owned, only');
+  });
+
   it('rows stuck in processing after a crash are re-claimed', async () => {
     await ingest(pool, evt('evt_4'));
     await pool.query(`UPDATE webhook_inbox SET status = 'processing', attempts = 1, locked_at = now() - interval '1 hour'`);

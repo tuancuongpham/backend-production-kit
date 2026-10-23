@@ -1,7 +1,7 @@
 // Webhook ingestion: verify → store once → process async with retries → dead-letter → replay → reconcile.
 import { createHmac, timingSafeEqual } from 'node:crypto';
 import type pg from 'pg';
-import { withTransaction } from './pg-transaction.ts';
+import { rollback, withClient } from './pg-transaction.ts';
 import { callHook } from './hooks.ts';
 import { pgJson, pgText } from './pg-values.ts';
 import { runLoops } from './worker-loop.ts';
@@ -145,6 +145,9 @@ export function backoffMs(attempt: number, baseMs: number, maxMs: number, random
 /** A claimed row and the lease that proves this worker still owns it. */
 type Claimed = InboxRow & { lease_id: string };
 
+const BIGINT = /^\d{1,19}$/;
+const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+
 const positiveInt = (v: number, name: string) => {
   if (!Number.isInteger(v) || v < 1) throw new RangeError(`webhook worker: ${name} must be a positive integer, got ${v}`);
   return v;
@@ -246,23 +249,32 @@ export class InboxWorker {
   async #process(row: Claimed): Promise<Outcome> {
     const handler = this.#handlers[`${row.provider}:${row.event_type}`] ?? this.#handlers[`${row.provider}:*`];
     try {
-      return await withTransaction(this.#pool, async (tx) => {
-        const own = await tx.query(`SELECT 1 FROM webhook_inbox WHERE id = $1 AND lease_id = $2 FOR UPDATE`, [row.id, row.lease_id]);
-        if (own.rowCount === 0) return 'lost';
-        if (!handler) {
-          // Unknown event types are acknowledged, not retried forever. Keep the row for audit.
-          await tx.query(
-            `UPDATE webhook_inbox SET status = 'done', processed_at = now(), locked_at = NULL, lease_id = NULL, last_error = 'ignored: no handler' WHERE id = $1`,
-            [row.id],
-          );
-          return 'ignored';
+      // BEGIN and the lock are one call, and so are marking the row done and COMMIT: 3 round trips instead of 5 with a
+      // one-statement handler, 14% less time per event (docs/performance.md). A statement with parameters can't share
+      // a call, so the row's id and lease are written into the SQL. They come from this worker's own claim, and
+      // nothing but a bigint and a uuid passes the check: never inline a value that hasn't passed a check this strict.
+      if (!BIGINT.test(String(row.id)) || !UUID.test(row.lease_id)) throw new Error(`webhook worker: unexpected claim ${row.id} / ${row.lease_id}`);
+      const done = (lastError: string) =>
+        `UPDATE webhook_inbox SET status = 'done', processed_at = now(), locked_at = NULL, lease_id = NULL, last_error = ${lastError} WHERE id = ${row.id}; COMMIT`;
+      return await withClient(this.#pool, async (tx, _lost, discard) => {
+        try {
+          const [, own] = (await tx.query(`BEGIN; SELECT 1 FROM webhook_inbox WHERE id = ${row.id} AND lease_id = '${row.lease_id}' FOR UPDATE`)) as unknown as pg.QueryResult[];
+          if (own.rowCount === 0) {
+            await tx.query('ROLLBACK');
+            return 'lost';
+          }
+          if (!handler) {
+            // Unknown event types are acknowledged, not retried forever. Keep the row for audit.
+            await tx.query(done(`'ignored: no handler'`));
+            return 'ignored';
+          }
+          await handler(row, tx);
+          await tx.query(done('NULL'));
+          return 'done';
+        } catch (err) {
+          await rollback(tx, err, discard);
+          throw err;
         }
-        await handler(row, tx);
-        await tx.query(
-          `UPDATE webhook_inbox SET status = 'done', processed_at = now(), locked_at = NULL, lease_id = NULL, last_error = NULL WHERE id = $1`,
-          [row.id],
-        );
-        return 'done';
       });
     } catch (err) {
       // The handler threw, or its connection died (failover, idle_in_transaction_session_timeout): the transaction
@@ -318,6 +330,10 @@ export async function replay(pool: pg.Pool, filter: { ids?: string[]; provider?:
 export async function pruneInbox(pool: pg.Pool, opts: { olderThanDays?: number; batchSize?: number } = {}) {
   const olderThanDays = opts.olderThanDays ?? 30;
   const batchSize = opts.batchSize ?? 5000;
+  // A window under a day drops the dedup keys of events the provider is still retrying; a batch of 0 deletes nothing,
+  // and "fewer than batchSize" never holds, so the loop would never end.
+  if (!Number.isInteger(olderThanDays) || olderThanDays < 1) throw new RangeError(`pruneInbox: olderThanDays must be a whole number of days, at least 1, got ${olderThanDays}`);
+  if (!Number.isInteger(batchSize) || batchSize < 1) throw new RangeError(`pruneInbox: batchSize must be a positive integer, got ${batchSize}`);
   let total = 0;
   for (;;) {
     const res = await pool.query(

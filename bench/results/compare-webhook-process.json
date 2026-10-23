@@ -1,0 +1,88 @@
+{
+  "name": "webhook-process",
+  "date": "2026-10-23T19:29:52.470Z",
+  "node": "v24.22.1",
+  "rows": [
+    {
+      "variant": "A. lock, mark done, BEGIN and COMMIT as calls of their own (0.6.0)",
+      "p50 ms": 1.985,
+      "p95 ms": 3.23,
+      "mean ms": 2.076
+    },
+    {
+      "variant": "B. \"BEGIN; lock\" and \"mark done; COMMIT\" as one call each",
+      "p50 ms": 1.699,
+      "p95 ms": 2.938,
+      "mean ms": 1.8
+    },
+    {
+      "variant": "C. shipped worker, per event (batches of 10)",
+      "p50 ms": "-",
+      "p95 ms": "-",
+      "mean ms": 2.003
+    }
+  ],
+  "rounds": {
+    "A. lock, mark done, BEGIN and COMMIT as calls of their own (0.6.0)": [
+      {
+        "p50": 2.114,
+        "p95": 3.404,
+        "mean": 2.256
+      },
+      {
+        "p50": 1.971,
+        "p95": 3.23,
+        "mean": 2.074
+      },
+      {
+        "p50": 1.985,
+        "p95": 3.207,
+        "mean": 2.076
+      },
+      {
+        "p50": 1.94,
+        "p95": 3.213,
+        "mean": 2.038
+      },
+      {
+        "p50": 2.013,
+        "p95": 3.52,
+        "mean": 2.202
+      }
+    ],
+    "B. \"BEGIN; lock\" and \"mark done; COMMIT\" as one call each": [
+      {
+        "p50": 1.81,
+        "p95": 3.142,
+        "mean": 1.949
+      },
+      {
+        "p50": 1.684,
+        "p95": 2.897,
+        "mean": 1.787
+      },
+      {
+        "p50": 1.699,
+        "p95": 2.938,
+        "mean": 1.8
+      },
+      {
+        "p50": 1.673,
+        "p95": 2.934,
+        "mean": 1.769
+      },
+      {
+        "p50": 1.726,
+        "p95": 3.165,
+        "mean": 1.9
+      }
+    ]
+  },
+  "drains": [
+    2.1075879055000004,
+    2.0026154634999984,
+    2.001460813499998,
+    2.0402377860000014,
+    1.9825603650000012
+  ]
+}

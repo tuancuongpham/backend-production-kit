@@ -5,6 +5,10 @@
 import { createHash } from 'node:crypto';
 import { CircuitBreaker } from './circuit-breaker.ts';
 import { callHook } from './hooks.ts';
+import { withTimeout } from './with-timeout.ts';
+
+/** The longest timer Node can schedule: it runs a longer one after 1 ms. */
+const MAX_TIMER_MS = 2 ** 31 - 1;
 
 export interface ChatMessage {
   role: 'system' | 'user' | 'assistant';
@@ -148,6 +152,13 @@ export interface GatewayOptions {
    * Log and count them: the request goes on without that piece.
    */
   onError?: (err: unknown, stage: GatewayStage) => unknown;
+  /**
+   * How long one call to the cache store or to `embed` may take (default 1000 ms). Both are optional: past it the
+   * request goes on without them, and the failure goes to onError. Without a deadline, an embedding API that never
+   * answered held every answer (the shadow lookup is awaited to save the embedding), and a cache store that never
+   * answered held every request.
+   */
+  cacheTimeoutMs?: number;
   timeoutMs?: number; // per provider attempt, default 60s
   /** Per provider: open after `threshold` failures in a row; after `cooldownMs`, one probe call decides. Default 3 → 30 s. */
   breaker?: { threshold: number; cooldownMs: number };
@@ -238,6 +249,7 @@ export class LlmGateway {
   readonly #onUsageError?: (err: unknown) => unknown;
   readonly #onError?: GatewayOptions['onError'];
   readonly #timeoutMs: number;
+  readonly #cacheTimeoutMs: number;
   readonly #now: () => number;
   readonly #breakers: Map<string, CircuitBreaker>;
 
@@ -258,10 +270,13 @@ export class LlmGateway {
       return v;
     };
     const timeoutMs = o.timeoutMs ?? 60_000;
+    const cacheTimeoutMs = o.cacheTimeoutMs ?? 1000;
     const threshold = o.semanticThreshold ?? 0.95;
     const ttlSec = o.cacheTtlSec ?? 86_400;
     const fallbackTtlSec = o.fallbackCacheTtlSec ?? 300;
-    this.#timeoutMs = setting('timeoutMs', timeoutMs, Number.isInteger(timeoutMs) && timeoutMs >= 1 && timeoutMs <= 2 ** 31 - 1, 'a whole number of ms');
+    const timer = (v: number) => Number.isInteger(v) && v >= 1 && v <= MAX_TIMER_MS;
+    this.#timeoutMs = setting('timeoutMs', timeoutMs, timer(timeoutMs), `a whole number of ms from 1 to ${MAX_TIMER_MS}`);
+    this.#cacheTimeoutMs = setting('cacheTimeoutMs', cacheTimeoutMs, timer(cacheTimeoutMs), `a whole number of ms from 1 to ${MAX_TIMER_MS}`);
     this.#threshold = setting('semanticThreshold', threshold, threshold > 0 && threshold <= 1, 'a cosine similarity above 0 and at most 1 (0.95, not 95)');
     this.#ttlSec = setting('cacheTtlSec', ttlSec, Number.isFinite(ttlSec) && ttlSec >= 0, 'a number of seconds, 0 or more');
     this.#fallbackTtlSec = setting('fallbackCacheTtlSec', fallbackTtlSec, Number.isFinite(fallbackTtlSec) && fallbackTtlSec >= 0, 'a number of seconds, 0 or more');
@@ -358,7 +373,7 @@ export class LlmGateway {
   async #semanticLookup(ctx: CallContext, scope: string, question: string): Promise<SemanticLookup> {
     let embedding: number[];
     try {
-      embedding = await this.#embed!(question);
+      embedding = await this.#deadline('embed', () => this.#embed!(question));
     } catch (err) {
       this.#report(err, 'embed');
       return { question, embedding: null, similar: null };
@@ -492,11 +507,16 @@ export class LlmGateway {
 
   async #bestEffort<T>(stage: GatewayStage, op: () => Promise<T>, fallback: T): Promise<T> {
     try {
-      return await op();
+      return await this.#deadline(stage, op);
     } catch (err) {
       this.#report(err, stage);
       return fallback;
     }
+  }
+
+  /** An optional piece of infrastructure, waited for at most cacheTimeoutMs. A synchronous throw becomes a rejection. */
+  #deadline<T>(stage: GatewayStage, op: () => Promise<T>): Promise<T> {
+    return withTimeout(Promise.resolve().then(op), this.#cacheTimeoutMs, () => new Error(`llm-gateway: ${stage} took longer than ${this.#cacheTimeoutMs} ms`));
   }
 
   #report(err: unknown, stage: GatewayStage) {

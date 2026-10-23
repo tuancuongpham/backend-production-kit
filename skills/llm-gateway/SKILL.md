@@ -44,11 +44,15 @@ LLM APIs are the most expensive and least reliable dependency most apps have. Th
      - Answers from a fallback provider are cached for `fallbackCacheTtlSec` (default 300 s), not the full TTL: they shouldn't outlive the outage.
    - **Once the model has answered, nothing can fail the request or buy the answer again.** Settling the budget and writing the caches come after the answer and are best effort: their errors go to `onError(err, stage)`, never to the fallback provider.
    - **Optional infrastructure fails open**: a cache store or embedding API that is down means no cache for that request, not a failed request. The budget store is a control and fails closed: if the reservation can't be made, the request fails.
+     - Fails open **in time** too: each cache-store call and each `embed` call is waited for at most `cacheTimeoutMs`
+       (default 1000 ms), then reported to `onError` and dropped. Without that deadline, an embedding API that never
+       answered held every answer in shadow mode (the lookup is awaited to save the embedding), and a cache store
+       that never answered held every request.
    - **Cost** comes from a price table **in config**. Prices change; a missing price shows up as cost 0 and should alert.
    - **Accounting never fails a request**: `onUsage` errors, sync or async, are caught and passed to `onUsageError` (or `onError`).
    - `createGateway` refuses a NaN timeout or TTL and a `semanticThreshold` outside (0, 1] with a `RangeError`: a NaN
      timeout failed every provider and opened their breakers, and a threshold of 95, meant as 95%, never matched.
-   - Copy `circuit-breaker.ts`, `hooks.ts`, `pg-transaction.ts` and `pg-values.ts` along with the gateway files: they are the kit's shared building blocks, identical in every skill that has them.
+   - Copy `circuit-breaker.ts`, `hooks.ts`, `pg-transaction.ts`, `pg-values.ts` and `with-timeout.ts` along with the gateway files: they are the kit's shared building blocks, identical in every skill that has them.
 2. **Stores**: [references/semantic-cache.sql](references/semantic-cache.sql) + [references/pg-stores.ts](references/pg-stores.ts):
    - Postgres/pgvector exact and semantic caches (Redis is a fine alternative for the exact cache);
    - the semantic lookup searches **only the caller's scope, exactly**, by default (`pgCache(pool)`). Measured p50 is 0.3 ms at 120 entries per scope, 1.5 ms at 1,000 and 9 ms at 5,000;

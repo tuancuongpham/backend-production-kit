@@ -128,6 +128,8 @@ export function pgBudget(pool: pg.Pool): BudgetStore {
 /** Delete expired cache rows in batches. Run it on a schedule: nothing reads them again, and without
  *  this both cache tables grow forever. */
 export async function pruneLlmCache(pool: pg.Pool, batchSize = 5000) {
+  // A batch of 0 deletes nothing, and "fewer than batchSize" never holds: the loop would never end.
+  if (!Number.isInteger(batchSize) || batchSize < 1) throw new RangeError(`pruneLlmCache: batchSize must be a positive integer, got ${batchSize}`);
   const prune = async (sql: string) => {
     let total = 0;
     for (;;) {

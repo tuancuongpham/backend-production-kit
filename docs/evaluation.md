@@ -36,6 +36,17 @@ Three skills — `agent-safe-db`, `webhook-ingestion` and `llm-gateway` — were
 
 Each cell is *with skill – without skill*. Bold marks runs redone with the improved skills.
 
+What the agent shipped in the last iteration:
+
+| Task | Without the kit, the agent shipped… | With the kit, the agent shipped… |
+|---|---|---|
+| **Support bot reads orders from Postgres** | a DB role that could read **raw phone, email and name of every customer**; rows scoped only by `WHERE` clauses in app code; guest lookups by a phone number the model pulled from chat, **on by default** | masked views as the only thing the role can read; rows scoped **inside Postgres** by a setting only the server sets; a test proving writes fail with *permission denied* |
+| **"Just let the LLM write the SQL"** | a generic "LLM output is untrusted" note, and a "read-only" test that ran on two different connections (**it proved nothing**) | the actual risk explained (model SQL can flip `read_only` and `set_config`), a parser that rejects them, `CREATE`/`TEMP` revoked, safer named tools offered |
+| **VNPay IPN credits twice** | a correct row-locked fix, but **no retry queue, dead letters or replay**: after a handler bug you depend on VNPay's own retries and have nothing to re-run once the fix ships | IPN stored once, then credited by a worker with retries, dead-letter state, replay CLI and `querydr` reconciliation |
+| **Stripe webhook** | replay and reconciliation **only described in the README**; duplicate test counted inbox rows, not payments | replay CLI and a 15-minute `events.list` reconciliation in code; tests signed with Stripe's own helper; **10 concurrent duplicates → exactly one payment** |
+| **OpenAI bill tripled: cap per customer** | a cap that **blocked nothing by default** ("observe" mode); no alert on a spending spike | $20/customer cap enforced out of the box, **atomic under concurrent requests**, spike alert at 3× the 7-day average, unchanged tickets never re-summarized |
+| **Semantic cache for LLM calls** | caching **non-deterministic (temperature > 0) answers by default** | only deterministic requests cached, per-tenant scope, shadow mode until the threshold is measured |
+
 ## What each iteration changed
 
 **Iteration 1.** The skill won every prompt except VNPay (tie), but the result had two problems:

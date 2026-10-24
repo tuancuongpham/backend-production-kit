@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 0.7.0 — 2026-10-24
 
 ### Fixed — latent bugs, round 7: state taken on trust, waits without an end
 Round 7 looked for state the code assumed instead of checking: a connection still running a statement the client had
@@ -81,6 +81,8 @@ looked for waits without an end and for the failure path of redaction. Its 20 hy
   and throws a `TypeError` naming the case for any other.
 - `agent-safe-db`: a tool's SQL ending with a semicolon is refused at startup.
 - `pii-redaction`: the pino hook redacts every argument; `redactValue` of an error keeps its `errors`.
+- The README is the 20 skills, grouped by area, each with when to use it and its measured effect: 120 lines instead
+  of 262. The with-and-without comparison of what the agent shipped moved to `docs/evaluation.md`.
 - To upgrade from 0.6.0:
   - no SQL changes. Copy the new `pg-transaction.ts`, `circuit-breaker.ts` and `worker-loop.ts` with the skills
     that import them, and `with-timeout.ts` with `llm-gateway`.

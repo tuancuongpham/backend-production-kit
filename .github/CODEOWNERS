@@ -1,0 +1,3 @@
+# Every change is reviewed by the maintainer: GitHub requests the review on each pull request, and the ruleset on
+# main requires this approval (and green `check` and `verify` jobs) before a pull request can merge.
+* @tuancuongpham

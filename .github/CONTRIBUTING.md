@@ -62,7 +62,9 @@ npm run bench         # if you touched a hot path: compare with docs/performance
 ```
 
 CI runs the same checks on every pull request: `check` first, then `verify` against Postgres, Redis and
-Toxiproxy service containers.
+Toxiproxy service containers. A pull request merges once both pass and the maintainer has approved it
+([CODEOWNERS](CODEOWNERS)); a push to it after the approval asks for a new one. On a first contribution, CI
+starts once the maintainer approves the run.
 
 - **Lint is for bugs, not style.** The rules catch a promise nobody awaits, a `return` inside `try` that skips its
   `catch`, a switch that misses a case. Fix the code, not the rule; disable one inline only with the reason.
